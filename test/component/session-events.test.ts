@@ -1861,11 +1861,7 @@ test('PiAcpSession: omits only zero-length assistant chunks including extension 
       ...preserved
     ]
   )
-  assert.deepEqual(proc.extensionUiResponses, [
-    { id: 'notify-0', cancelled: true },
-    { id: 'notify-5', cancelled: true },
-    { id: 'notify-2', cancelled: true }
-  ])
+  assert.deepEqual(proc.extensionUiResponses, [])
 })
 
 test('PiAcpSession: extension error before successful prompt acknowledgment stays visible and ordered without an agent run', async () => {

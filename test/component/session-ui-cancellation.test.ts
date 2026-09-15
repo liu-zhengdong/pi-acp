@@ -35,7 +35,9 @@ test('pending extension permissions cancel exactly once and ignore late replies'
   await tick()
   assert.equal(proc.extensionUiResponses.length, 2)
   assert.deepEqual(
-    conn.updates.map(notification => notification.update),
+    conn.updates
+      .filter(notification => notification.update.sessionUpdate === 'tool_call_update')
+      .map(notification => notification.update),
     [
       { sessionUpdate: 'tool_call_update', toolCallId: 'pi-ui-one', status: 'completed' },
       { sessionUpdate: 'tool_call_update', toolCallId: 'pi-ui-two', status: 'completed' }
@@ -93,7 +95,10 @@ for (const scenario of [
     const deliver = conn.sessionUpdate.bind(conn)
     conn.sessionUpdate = async notification => {
       const update = notification.update
-      assert.equal(update.sessionUpdate, 'tool_call_update', 'permission request itself creates the card')
+      if (update.sessionUpdate === 'tool_call') {
+        cardId = update.toolCallId
+        states.push('pending')
+      }
       if (update.sessionUpdate === 'tool_call_update') {
         assert.equal(update.toolCallId, cardId)
         states.push(update.status!)
@@ -106,10 +111,12 @@ for (const scenario of [
     await tick()
     assert.deepEqual(
       states,
-      scenario.optionId === 'error' ? ['waiting', 'completed'] : ['waiting', scenario.status, 'completed']
+      scenario.optionId === 'error'
+        ? ['pending', 'waiting', 'completed']
+        : ['pending', 'waiting', scenario.status, 'completed']
     )
     assert.deepEqual(proc.extensionUiResponses, [{ id: 'dialog', ...scenario.reply }])
-    assert.equal(conn.updates.length, 1)
+    assert.equal(conn.updates.length, 2)
   })
 }
 
@@ -133,6 +140,7 @@ for (const settlement of ['duplicate', 'dispose', 'termination', 'shutdown'] as 
     })
     const event = { type: 'extension_ui_request', id: 'dialog', method: 'confirm' }
     proc.emit(event)
+    await tick()
     if (settlement === 'duplicate') proc.emit(event)
     else if (settlement === 'dispose') session.dispose()
     else if (settlement === 'termination') proc.emitTermination()
@@ -142,7 +150,9 @@ for (const settlement of ['duplicate', 'dispose', 'termination', 'shutdown'] as 
     assert.equal(requests, 1)
     assert.deepEqual(proc.extensionUiResponses, [{ id: 'dialog', cancelled: true }])
     assert.deepEqual(
-      conn.updates.map(notification => notification.update),
+      conn.updates
+        .filter(notification => notification.update.sessionUpdate === 'tool_call_update')
+        .map(notification => notification.update),
       [{ sessionUpdate: 'tool_call_update', toolCallId: 'pi-ui-dialog', status: 'completed' }]
     )
   })
@@ -210,4 +220,47 @@ test('foreign permission requests and cancelled forms never terminalize syntheti
     { id: 'form', cancelled: true }
   ])
   assert.deepEqual(conn.updates, [])
+})
+
+test('preacceptance permissions announce before requesting and cancel while announcement is blocked', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const session = new PiAcpSession({
+    sessionId: 'ui',
+    cwd: '/tmp',
+    proc: proc as unknown as PiRpcProcess,
+    conn: asAgentConn(conn)
+  })
+  let release!: () => void
+  const gate = new Promise<void>(resolve => {
+    release = resolve
+  })
+  const deliver = conn.sessionUpdate.bind(conn)
+  conn.sessionUpdate = async notification => {
+    if (notification.update.sessionUpdate === 'tool_call') await gate
+    await deliver(notification)
+  }
+  proc.prompt = async () => new Promise(() => {})
+  const prompt = session.prompt('/ask')
+  proc.emit({ type: 'extension_ui_request', id: 'preflight', method: 'confirm' })
+  const cancel = session.cancel()
+  await tick()
+  assert.equal(conn.permissionRequests.length, 0)
+  release()
+  await cancel
+  assert.equal(await prompt, 'cancelled')
+  assert.deepEqual(proc.extensionUiResponses, [{ id: 'preflight', cancelled: true }])
+})
+
+test('fire-and-forget UI never sends responses, including foreign-run notifications', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  new PiAcpSession({ sessionId: 'ui', cwd: '/tmp', proc: proc as unknown as PiRpcProcess, conn: asAgentConn(conn) })
+  for (const method of ['setStatus', 'setWidget', 'setTitle', 'set_editor_text', 'notify'])
+    proc.emit({ type: 'extension_ui_request', id: method, method, message: 'notice' })
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'extension_ui_request', id: 'foreign', method: 'notify', message: 'foreign' })
+  await tick()
+  assert.deepEqual(proc.extensionUiResponses, [])
+  assert.equal(conn.updates.length, 1)
 })

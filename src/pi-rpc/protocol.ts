@@ -2,7 +2,10 @@ export type PiThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'x
 
 export type PiRpcCommand =
   | { type: 'prompt'; id?: string; message: string; images?: unknown[]; streamingBehavior?: 'steer' | 'followUp' }
-  | { type: 'abort' | 'get_state' | 'get_available_models' | 'get_available_thinking_levels'; id?: string }
+  | {
+      type: 'abort' | 'clear_queue' | 'get_state' | 'get_available_models' | 'get_available_thinking_levels'
+      id?: string
+    }
   | { type: 'set_model'; id?: string; provider: string; modelId: string }
   | { type: 'set_thinking_level'; id?: string; level: PiThinkingLevel }
   | { type: 'set_follow_up_mode' | 'set_steering_mode'; id?: string; mode: 'all' | 'one-at-a-time' }
@@ -67,6 +70,9 @@ const KNOWN_EVENTS = new Set([
   'thinking_level_changed',
   'auto_retry_start',
   'auto_retry_end',
+  'summarization_retry_scheduled',
+  'summarization_retry_attempt_start',
+  'summarization_retry_finished',
   'auto_compaction_start',
   'auto_compaction_end',
   'compaction_start',

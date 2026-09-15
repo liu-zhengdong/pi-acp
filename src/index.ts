@@ -57,9 +57,9 @@ const output = new ReadableStream<Uint8Array>({
 
 const stream = ndJsonStream(input, output)
 
-// Slightly above PiRpcProcess's 2s SIGTERM -> SIGKILL grace so a child that
-// ignores SIGTERM is still killed before the adapter exits.
-const SHUTDOWN_TERMINATION_TIMEOUT_MS = 3_000
+// Covers the shared 10s cancellation deadline plus the 2s SIGTERM -> SIGKILL
+// grace, with 1s for shutdown bookkeeping.
+const SHUTDOWN_TERMINATION_TIMEOUT_MS = 13_000
 
 // Disposes session subprocesses, then gives them a bounded window to actually
 // terminate: exiting immediately would preempt the SIGTERM -> SIGKILL

@@ -40,3 +40,13 @@ test('wire decoder preserves validated extension diagnostics', () => {
     }
   }
 })
+
+test('wire decoder preserves summarization retry lifecycle', () => {
+  for (const type of [
+    'summarization_retry_scheduled',
+    'summarization_retry_attempt_start',
+    'summarization_retry_finished'
+  ]) {
+    assert.deepEqual(decodePiRecord({ type }), { type })
+  }
+})

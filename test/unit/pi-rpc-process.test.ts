@@ -578,7 +578,14 @@ test('PiRpcProcess: shared wrappers preserve errors, void returns and specialize
     return result
   }
   assert.deepEqual(await respond(() => proc.getState(), true, { isStreaming: false }), { isStreaming: false })
-  assert.equal(await respond(() => proc.abort(), true, { ignored: true }), undefined)
+  const abort = proc.abort()
+  for (const type of ['clear_queue', 'abort']) {
+    await tick()
+    const command = JSON.parse(lines.at(-1)!)
+    assert.equal(command.type, type)
+    mock.stdout.write(JSON.stringify({ type: 'response', id: command.id, command: type, success: true }) + '\n')
+  }
+  assert.equal(await abort, undefined)
   await assert.rejects(
     respond(() => proc.getCommands(), false, { detail: 'failed' }),
     /pi get_commands failed: {"detail":"failed"}/
@@ -602,3 +609,279 @@ test('PiRpcProcess: shared wrappers preserve errors, void returns and specialize
   await entries
   assert.deepEqual(order, ['snapshot', 'agent_start'])
 })
+
+const lifecycleOwner = '11111111-1111-4111-8111-111111111111'
+function controlWidget(state: string, owner = lifecycleOwner, error = 'busy') {
+  return (
+    JSON.stringify({
+      type: 'extension_ui_request',
+      id: 'control',
+      method: 'setWidget',
+      widgetKey: 'pi-acp-lifecycle',
+      widgetLines: [JSON.stringify({ version: 1, owner, state, error })]
+    }) + '\n'
+  )
+}
+
+test('PiRpcProcess: rejected begin never dispatches user text or kills Pi; next begin can recover', async () => {
+  const mock = new MockChild()
+  const proc = PiRpcProcess.fromChild(asChild(mock))
+  const messages: string[] = []
+  let state = 'rejected'
+  mock.stdin.on('data', chunk => {
+    const command = JSON.parse(String(chunk))
+    if (command.message) messages.push(command.message)
+    if (command.message?.startsWith('/pi-acp-control begin')) mock.stdout.write(controlWidget(state))
+    mock.stdout.write(
+      JSON.stringify({
+        type: 'response',
+        id: command.id,
+        command: command.type,
+        success: true,
+        data: { commands: [{ name: 'pi-acp-control' }] }
+      }) + '\n'
+    )
+  })
+  await assert.rejects(proc.prompt('must not reach model', [], undefined, lifecycleOwner), /busy/)
+  assert.equal(mock.killed, false)
+  assert.ok(!messages.includes('must not reach model'))
+  state = 'ready'
+  await proc.prompt('safe retry', [], undefined, lifecycleOwner)
+  assert.equal(messages.at(-1), 'safe retry')
+  assert.equal(mock.killed, false)
+})
+
+for (const ack of ['missing', 'foreign', 'error']) {
+  test(`PiRpcProcess: ${ack} begin acknowledgement fails closed despite RPC success`, async () => {
+    const mock = new MockChild()
+    const proc = PiRpcProcess.fromChild(asChild(mock))
+    const messages: string[] = []
+    mock.stdin.on('data', chunk => {
+      const command = JSON.parse(String(chunk))
+      if (command.message) {
+        messages.push(command.message)
+        if (ack !== 'missing')
+          mock.stdout.write(
+            controlWidget(ack === 'foreign' ? 'ready' : 'error', ack === 'foreign' ? 'foreign' : lifecycleOwner)
+          )
+      }
+      mock.stdout.write(
+        JSON.stringify({
+          type: 'response',
+          id: command.id,
+          command: command.type,
+          success: true,
+          data: { commands: [{ name: 'pi-acp-control' }] }
+        }) + '\n'
+      )
+    })
+    await assert.rejects(proc.prompt('unsafe', [], undefined, lifecycleOwner), /lifecycle begin failed/)
+    assert.equal(messages.length, 1)
+    assert.equal(mock.killed, true)
+    mock.emit('close', 0, null)
+  })
+}
+
+for (const finish of [true, false]) {
+  test(`PiRpcProcess: owner abort shares a bounded deadline (${finish ? 'slow success' : 'timeout'})`, async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'] })
+    const mock = new MockChild()
+    const proc = PiRpcProcess.fromChild(asChild(mock))
+    const commands: Array<{ type: string; message?: string }> = []
+    mock.stdin.on('data', chunk => {
+      const command = JSON.parse(String(chunk))
+      commands.push(command)
+      const reply = () =>
+        mock.stdout.write(
+          JSON.stringify({ type: 'response', id: command.id, command: command.type, success: true }) + '\n'
+        )
+      if (command.type === 'prompt') {
+        const final = command.message.startsWith('/pi-acp-control check')
+        assert.equal(command.message, `/pi-acp-control ${final ? 'check' : 'cancel'} ${lifecycleOwner} 10000`)
+        if (finish) {
+          if (final) {
+            mock.stdout.write(controlWidget('cancelled'))
+            reply()
+          } else
+            setTimeout(() => {
+              mock.stdout.write(controlWidget('stopping'))
+              reply()
+            }, 8500)
+        }
+      } else reply()
+    })
+    const abort = proc.abort(lifecycleOwner)
+    const result = finish ? abort : assert.rejects(abort, /cancellation timed out|shutting down|timed out/)
+    await tick()
+    t.mock.timers.tick(8500)
+    await tick()
+    if (!finish) {
+      t.mock.timers.tick(1500)
+      await tick()
+    }
+    await result
+    assert.equal(mock.killed, !finish)
+    assert.deepEqual(
+      commands.map(c => c.type),
+      finish ? ['clear_queue', 'abort', 'prompt', 'clear_queue', 'abort', 'prompt'] : ['clear_queue', 'abort', 'prompt']
+    )
+    assert.equal(proc.hasPendingRequests(), false)
+    mock.emit('close', 0, null)
+  })
+}
+
+for (const quiet of [false, true]) {
+  test(`PiRpcProcess: unconfirmed nested control diagnostic survives pending until ${quiet ? 'quiescence' : 'deadline'}`, async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'] })
+    const mock = new MockChild()
+    const proc = PiRpcProcess.fromChild(asChild(mock))
+    const diagnostic = 'pi-subagents interrupt failed for nested: owner is not reachable'
+    let quiescent = false
+    let settled = false
+    mock.stdin.on('data', chunk => {
+      const command = JSON.parse(String(chunk))
+      const phase = command.message?.split(' ')[1]
+      if (phase === 'cancel') mock.stdout.write(controlWidget('stopping', lifecycleOwner, diagnostic))
+      if (phase === 'check')
+        mock.stdout.write(
+          controlWidget(quiescent ? 'cancelled' : 'pending', lifecycleOwner, quiescent ? '' : diagnostic)
+        )
+      mock.stdout.write(
+        JSON.stringify({ type: 'response', id: command.id, command: command.type, success: true }) + '\n'
+      )
+    })
+    const abort = proc.abort(lifecycleOwner).then(() => {
+      settled = true
+    })
+    const result = quiet
+      ? abort
+      : assert.rejects(
+          abort,
+          /detached background work may still be running; last unconfirmed nested control:.*owner is not reachable/
+        )
+    await tick()
+    assert.equal(settled, false, 'a control diagnostic is neither fatal nor quiescence proof')
+    quiescent = quiet
+    t.mock.timers.tick(quiet ? 25 : 10000)
+    await result
+    assert.equal(settled, quiet)
+    assert.equal(mock.killed, !quiet)
+    assert.equal(proc.hasPendingRequests(), false)
+    mock.emit('close', 0, null)
+  })
+}
+
+test('PiRpcProcess: abort rejection quarantines before disposal can renew its deadline', async () => {
+  const mock = new MockChild()
+  const proc = PiRpcProcess.fromChild(asChild(mock))
+  const lines = collectStdin(mock)
+  mock.stdin.on('data', chunk => {
+    const command = JSON.parse(String(chunk))
+    mock.stdout.write(
+      JSON.stringify({ type: 'response', id: command.id, command: command.type, success: false, error: 'failed' }) +
+        '\n'
+    )
+  })
+  await assert.rejects(proc.abort(lifecycleOwner), /failed/)
+  assert.equal(mock.killed, true)
+  proc.dispose({ backgroundOwner: lifecycleOwner })
+  assert.equal(lines.length, 1, 'no second abort transaction after failure')
+  mock.emit('close', 0, null)
+})
+
+test('PiRpcProcess: last-stop synthesis is reconciled after native abort before read-only success', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] })
+  const mock = new MockChild()
+  const proc = PiRpcProcess.fromChild(asChild(mock))
+  const phases: string[] = []
+  let stops = 0
+  let quiescent = false
+  let settled = false
+  mock.stdin.on('data', chunk => {
+    const command = JSON.parse(String(chunk))
+    const phase = command.message?.split(' ')[1] ?? command.type
+    phases.push(phase)
+    if (phase === 'cancel') {
+      stops++
+      quiescent = false // Each stop can enqueue/start synthesis.
+      mock.stdout.write(controlWidget('stopping'))
+    } else if (phase === 'abort' && stops === 2) quiescent = true
+    else if (phase === 'check') {
+      assert.equal(phases.at(-2), 'abort')
+      mock.stdout.write(controlWidget(quiescent ? 'cancelled' : 'pending'))
+    }
+    mock.stdout.write(JSON.stringify({ type: 'response', id: command.id, command: command.type, success: true }) + '\n')
+  })
+  const cancellation = proc.abort(lifecycleOwner).then(() => {
+    settled = true
+  })
+  await tick()
+  assert.equal(settled, false, 'the first native abort exposed new owned work')
+  t.mock.timers.tick(25)
+  await cancellation
+  assert.deepEqual(phases, [
+    'clear_queue',
+    'abort',
+    'cancel',
+    'clear_queue',
+    'abort',
+    'check',
+    'cancel',
+    'clear_queue',
+    'abort',
+    'check'
+  ])
+  assert.equal(mock.killed, false)
+  assert.equal(quiescent, true)
+})
+
+test('PiRpcProcess: reserved public control prompts never write stdin', async () => {
+  const mock = new MockChild()
+  const proc = PiRpcProcess.fromChild(asChild(mock))
+  const lines = collectStdin(mock)
+  for (const operation of ['begin', 'cancel', 'check']) {
+    await assert.rejects(proc.prompt(`/pi-acp-control ${operation} ${lifecycleOwner}`), /reserved for the adapter/)
+  }
+  assert.deepEqual(lines, [])
+})
+
+for (const boundary of ['clear_queue', 'abort']) {
+  for (const close of [false, true]) {
+    test(`PiRpcProcess: owner upgrade during ${boundary} shares deadline and ${close ? 'disposes after' : 'awaits'} owned stop`, async t => {
+      t.mock.timers.enable({ apis: ['Date', 'setTimeout'] })
+      const mock = new MockChild()
+      const proc = PiRpcProcess.fromChild(asChild(mock))
+      const commands: Array<{ type: string; message?: string }> = []
+      let release!: () => void
+      let held = false
+      mock.stdin.on('data', chunk => {
+        const command = JSON.parse(String(chunk))
+        commands.push(command)
+        const reply = () =>
+          mock.stdout.write(
+            JSON.stringify({ type: 'response', id: command.id, command: command.type, success: true }) + '\n'
+          )
+        if (command.type === boundary && !held) {
+          held = true
+          release = reply
+          return
+        }
+        if (command.type === 'prompt') {
+          assert.match(command.message, new RegExp(`^/pi-acp-control (cancel|check) ${lifecycleOwner} 10000$`))
+          mock.stdout.write(controlWidget(command.message.includes(' check ') ? 'cancelled' : 'stopping'))
+        }
+        reply()
+      })
+      const initial = proc.abort()
+      await tick()
+      t.mock.timers.tick(2000)
+      const upgraded = close ? (proc.dispose({ backgroundOwner: lifecycleOwner }), initial) : proc.abort(lifecycleOwner)
+      release()
+      await Promise.all([initial, upgraded])
+      await tick()
+      assert.equal(commands.filter(c => c.type === 'prompt').length, 2)
+      assert.equal(mock.killed, close)
+      mock.emit('close', 0, null)
+    })
+  }
+}

@@ -6,6 +6,7 @@ import { dirname } from 'node:path'
 import { PiRpcProcess, PiRpcSpawnError } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
+import { resolveSessionDirectory } from './session-repository.js'
 import { PiAcpSession } from './session.js'
 import { toRequestError } from './session-errors.js'
 
@@ -131,7 +132,12 @@ export class SessionManager {
    * Every later path -- validation failure, registration race, teardown during
    * the spawn -- is then covered by {@link disposeAllAndWait}.
    */
-  spawnOwned(params: { cwd: string; sessionPath?: string; piCommand?: string }): Promise<PiRpcProcess> {
+  spawnOwned(params: {
+    cwd: string
+    sessionPath?: string
+    sessionDirectory?: string
+    piCommand?: string
+  }): Promise<PiRpcProcess> {
     // Refuse before a child exists. A caller can reach this point long after
     // teardown began -- a restore parked on {@link waitForRetiredProcesses} is
     // registered nowhere -- and by then `disposeAllAndWait` may already have
@@ -321,6 +327,7 @@ export class SessionManager {
     try {
       proc = await this.spawnOwned({
         cwd: params.cwd,
+        sessionDirectory: resolveSessionDirectory(params.cwd).path,
         piCommand: params.piCommand
       })
     } catch (e) {

@@ -42,6 +42,11 @@ import {
 export type StopReason = 'end_turn' | 'cancelled' | 'max_tokens'
 
 type PendingTurn = {
+  owner: string
+  backgroundActive: boolean
+  cancellationPending: boolean
+  piSettled: boolean
+  agentRunEverObserved: boolean
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
   completionStarted: boolean
@@ -145,6 +150,9 @@ const PI_TURN_BOUND_EVENT_TYPES = new Set([
   'tool_execution_end',
   'auto_retry_start',
   'auto_retry_end',
+  'summarization_retry_scheduled',
+  'summarization_retry_attempt_start',
+  'summarization_retry_finished',
   'auto_compaction_start',
   'auto_compaction_end',
   'compaction_start',
@@ -474,7 +482,10 @@ export class PiAcpSession {
     try {
       this.unsubscribe()
     } finally {
-      this.proc.dispose({ expected: this.disposalExpected })
+      this.proc.dispose({
+        expected: this.disposalExpected,
+        ...(this.pendingTurn?.piRunOwned ? { backgroundOwner: this.pendingTurn.owner } : {})
+      })
     }
   }
 
@@ -997,9 +1008,21 @@ export class PiAcpSession {
       return
     }
 
+    activeTurn.cancellationPending = true
     try {
-      await this.proc.abort()
-    } catch {
+      await this.proc.abort(activeTurn.owner)
+      activeTurn.cancellationPending = false
+      activeTurn.backgroundActive = false
+      if (this.pendingTurn === activeTurn && activeTurn.piSettled) this.completeTurn(activeTurn)
+    } catch (error) {
+      if (!this.disposed)
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: `Cancellation failed: ${error instanceof Error ? error.message : String(error)}; detached work may still be running.`
+          }
+        })
       // If abort cannot be acknowledged, pi may still be generating output.
       // Quarantine and terminate the channel, then settle locally rather than
       // leaving session/prompt pending indefinitely.
@@ -1048,10 +1071,17 @@ export class PiAcpSession {
     // abort is in flight, but settle those requests only after final updates.
     const queued = this.turnQueue.splice(0, this.turnQueue.length)
 
+    if (this.pendingTurn) this.pendingTurn.cancellationPending = true
     try {
-      await this.proc.abort()
-    } catch {
-      // The subprocess may already be gone; shutdown must still settle turns.
+      await this.proc.abort(this.pendingTurn?.piRunOwned ? this.pendingTurn.owner : undefined)
+    } catch (error) {
+      // Shutdown still settles, but a lost Pi channel does not prove detached
+      // descendants terminated. Publish the uncertainty before releasing ACP.
+      if (this.pendingTurn?.piRunOwned)
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Cancellation failed: ${String(error)}; detached work may still be running.` }
+        })
     }
 
     const turn = this.pendingTurn
@@ -1374,6 +1404,11 @@ export class PiAcpSession {
     this.turnFailure = null
 
     const turn: PendingTurn = {
+      owner: crypto.randomUUID(),
+      backgroundActive: false,
+      cancellationPending: false,
+      piSettled: false,
+      agentRunEverObserved: false,
       resolve: t.resolve,
       reject: t.reject,
       completionStarted: false,
@@ -1483,7 +1518,7 @@ export class PiAcpSession {
       }
     }
     this.proc
-      .prompt(message, images, markAccepted)
+      .prompt(message, images, markAccepted, turn.owner)
       .then(() => {
         // Compatibility for test doubles and older embedders that implement
         // prompt() but ignore the optional synchronous acceptance callback.
@@ -1524,15 +1559,23 @@ export class PiAcpSession {
    * instead of hanging forever.
    */
   private handlePromptAccepted(turn: PendingTurn): void {
-    if (this.pendingTurn !== turn || turn.completionStarted || !turn.promptAccepted || this.agentRunObserved) return
+    if (
+      this.pendingTurn !== turn ||
+      turn.completionStarted ||
+      !turn.promptAccepted ||
+      turn.agentRunEverObserved ||
+      turn.backgroundActive
+    )
+      return
 
     void this.proc.getState().then(
       state => {
-        if (this.pendingTurn !== turn || turn.completionStarted || this.agentRunObserved) return
+        if (this.pendingTurn !== turn || turn.completionStarted || turn.agentRunEverObserved || turn.backgroundActive)
+          return
         const isStreaming = Boolean((state as { isStreaming?: unknown } | null | undefined)?.isStreaming)
         // pi sets `isStreaming` synchronously before its agent run starts and
         // writes RPC output in order: when a run is active, its `agent_start`
-        // line precedes this get_state response, so agentRunObserved would
+        // line precedes this get_state response, so agentRunEverObserved would
         // already be true. isStreaming=false with no observed run means the
         // prompt was handled without an agent run.
         if (!isStreaming) this.completeTurn(turn)
@@ -1541,7 +1584,8 @@ export class PiAcpSession {
         // Without a successful idle-state probe, pi may still start the accepted
         // prompt later. Quarantine it before settlement so no late output can
         // escape into a closed or replacement ACP turn.
-        if (this.pendingTurn !== turn || turn.completionStarted || this.agentRunObserved) return
+        if (this.pendingTurn !== turn || turn.completionStarted || turn.agentRunEverObserved || turn.backgroundActive)
+          return
         const failure = this.procTermination ? terminationError(this.procTermination) : err
         this.dispose({ expected: false })
         this.failTurn(turn, failure)
@@ -1793,6 +1837,7 @@ export class PiAcpSession {
         turn.matchingPromptMessagesToSkip -= 1
       } else {
         turn.piRunOwned = true
+        turn.agentRunEverObserved = true
         this.agentRunObserved = true
         this.sendPendingCustomMessages()
       }
@@ -2217,6 +2262,27 @@ export class PiAcpSession {
         break
       }
 
+      case 'summarization_retry_scheduled': {
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Summarization: ${formatAutoRetryMessage(ev)}` }
+        })
+        break
+      }
+
+      case 'summarization_retry_attempt_start':
+      case 'summarization_retry_finished': {
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text:
+              type === 'summarization_retry_finished' ? 'Summarization retry finished.' : 'Retrying summarization...'
+          }
+        })
+        break
+      }
+
       case 'auto_retry_start': {
         this.emit({
           sessionUpdate: 'agent_message_chunk',
@@ -2304,6 +2370,10 @@ export class PiAcpSession {
           this.continuationExpected = false
         }
 
+        if (activeTurn && this.turnOwnsPiRun(activeTurn)) {
+          activeTurn.piSettled = false
+          activeTurn.agentRunEverObserved = true
+        }
         this.lowLevelAgentEnded = false
         break
       }
@@ -2374,6 +2444,14 @@ export class PiAcpSession {
           const error = new Error('Pi settled before the accepted prompt could be correlated with its run.')
           this.dispose({ expected: false })
           this.failTurn(activeTurn, error)
+          break
+        }
+
+        activeTurn.piSettled = true
+        if (activeTurn.backgroundActive || activeTurn.cancellationPending) {
+          // The companion owns exact async runs from this prompt and holds through
+          // pending notification delivery. Their synthesis starts a fresh Pi run.
+          this.agentRunObserved = false
           break
         }
 
@@ -2457,9 +2535,45 @@ export class PiAcpSession {
       return
     }
 
+    if (method === 'setWidget' && ev.widgetKey === 'pi-acp-lifecycle') {
+      const turn = this.pendingTurn
+      try {
+        const lines = ev.widgetLines
+        if (!Array.isArray(lines) || lines.length !== 1 || typeof lines[0] !== 'string') return
+        const state = JSON.parse(lines[0]) as { version?: unknown; owner?: unknown; state?: unknown; error?: unknown }
+        if (!turn || turn.completionStarted || state.version !== 1 || state.owner !== turn.owner) return
+        if (state.state === 'error') {
+          const error = new Error(`Background harness: ${String(state.error ?? 'lifecycle failed')}`)
+          this.emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: error.message } })
+          // The abort transaction owns cancellation settlement and its explicit
+          // detached-work warning. A widget is not a native-abort barrier.
+          if (turn.cancellationPending) return
+          this.dispose({ expected: false })
+          if (this.cancelRequested) this.completeTurn(turn)
+          else this.failTurn(turn, error)
+        } else if (state.state === 'active') {
+          turn.backgroundActive = true
+        } else if (state.state === 'idle' || state.state === 'cancelled') {
+          turn.backgroundActive = false
+          if (turn.piSettled && !turn.cancellationPending) {
+            if (this.turnFailure && !this.cancelRequested) this.failTurn(turn, this.turnFailure, true)
+            else this.completeTurn(turn)
+          }
+        }
+      } catch {
+        /* Ignore malformed, untrusted widget payloads. */
+      }
+      return
+    }
+
+    // Pi's display-only UI methods never wait for an extension_ui_response.
+    if (method === 'setStatus' || method === 'setWidget' || method === 'setTitle' || method === 'set_editor_text')
+      return
+
     const activeTurn = this.pendingTurn
     const belongsToPrompt = this.turnOwnsPiRun(activeTurn)
     if (!belongsToPrompt && (this.piBusyOutOfBand || Boolean(activeTurn) || Boolean(this.lifecycleAmbiguity))) {
+      if (method === 'notify') return
       // ACP permission requests and visible UI updates are turn-bound. An
       // observed autonomous extension run has no client request to attach
       // them to, so unblock pi by cancelling without contacting the client.
@@ -2488,7 +2602,6 @@ export class PiAcpSession {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock
       })
-      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return
     }
 
@@ -2573,7 +2686,10 @@ export class PiAcpSession {
     if (!pending) return null
     const toolCall = extensionUiToolCall(id, ev)
     pending.toolCallId = toolCall.toolCallId
+    this.emit({ sessionUpdate: 'tool_call', ...toolCall })
     try {
+      await this.flushEmits()
+      if (this.pendingUiRequests.get(id) !== pending) return null
       const response = await this.conn.requestPermission(
         { sessionId: this.sessionId, toolCall, options },
         { cancellationSignal: pending.controller.signal }

@@ -37,7 +37,7 @@ export function toAvailableCommandsFromPiGetCommands(
 
   for (const c of commandsRaw) {
     const name = typeof c?.name === 'string' ? c.name.trim() : ''
-    if (!name) continue
+    if (!name || name === 'pi-acp-control') continue
 
     const desc = typeof c?.description === 'string' ? c.description.trim() : ''
 

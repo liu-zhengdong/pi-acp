@@ -6,6 +6,7 @@ test('toAvailableCommandsFromPiGetCommands preserves pi-authoritative commands i
   const { commands } = toAvailableCommandsFromPiGetCommands({
     commands: [
       { name: 'x', description: 'X', source: 'extension' },
+      { name: 'pi-acp-control', description: 'internal', source: 'extension' },
       { name: 'skill:foo', description: 'Foo', source: 'skill' },
       { name: 'y', source: 'prompt', location: 'project' }
     ]

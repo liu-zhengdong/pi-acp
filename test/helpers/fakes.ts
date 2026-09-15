@@ -73,6 +73,7 @@ export class FakePiRpcProcess {
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  abortOwners: Array<string | undefined> = []
   disposed = false
   disposeCount = 0
   readonly disposeOptions: Array<{ expected?: boolean } | undefined> = []
@@ -152,7 +153,8 @@ export class FakePiRpcProcess {
   // Mirrors real pi: `abort` stops an agent run. It does NOT settle an
   // in-flight manual RPC such as compaction or export, so it must never be
   // used by tests to make a blocked command's promise resolve.
-  async abort(): Promise<void> {
+  async abort(owner?: string): Promise<void> {
+    this.abortOwners.push(owner)
     this.abortCount += 1
   }
 
