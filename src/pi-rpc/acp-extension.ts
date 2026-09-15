@@ -20,8 +20,7 @@ type Pi = {
 
 export const ACP_LIFECYCLE_WIDGET = 'pi-acp-lifecycle'
 const REGISTRY = Symbol.for('@agegr/pi-web/session-liveness/v1')
-// ponytail: normal delivery polls at 50ms for at most 30min; host lifecycle events can replace polling.
-const MAX_DRAIN_MS = 30 * 60_000
+// ponytail: normal delivery polls at 50ms; host lifecycle events can replace polling.
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
 const canonicalUuid = new RegExp(`^${UUID}$`)
 type SnapshotNode = { id?: unknown; kind?: unknown; state?: unknown; children?: SnapshotNode[] }
@@ -71,7 +70,6 @@ export default function acpExtension(pi: Pi): void {
   let context: Context | null = null
   let active = false
   let cancelling = false
-  let startedAt = 0
   let timer: ReturnType<typeof setInterval> | undefined
   const runs = new Set<string>()
   let runGeneration = 0
@@ -106,7 +104,6 @@ export default function acpExtension(pi: Pi): void {
       observationError = undefined
       if (busy && !active) {
         active = true
-        startedAt = Date.now()
         emit('active')
       }
       if (active && !busy && context.isIdle() && !context.hasPendingMessages() && !cancelling) {
@@ -114,8 +111,6 @@ export default function acpExtension(pi: Pi): void {
         runs.clear()
         stopTimer()
         emit('idle')
-      } else if (active && Date.now() - startedAt > MAX_DRAIN_MS) {
-        throw new Error('Timed out draining pi-subagents background work')
       }
     } catch (error) {
       // Keep exact owned IDs and keep observing: a temporarily missing provider
@@ -344,7 +339,6 @@ export default function acpExtension(pi: Pi): void {
     runGeneration++
     if (!active) {
       active = true
-      startedAt = Date.now()
       emit('active')
     }
     observe()

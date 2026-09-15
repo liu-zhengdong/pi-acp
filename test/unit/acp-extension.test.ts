@@ -168,6 +168,44 @@ test('companion holds exact session through pending delivery and queued synthesi
   delete globals[key]
 })
 
+test('companion keeps successive background work alive beyond 30 minutes', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'] })
+  const h = harness()
+  t.after(() => h.emit('session_shutdown'))
+  let busy = false
+  h.register({ name: 'pi-subagents', sessionId: 'session', isActive: () => busy })
+  await h.command(`begin ${owner}`)
+  busy = true
+  h.emit('tool_result', { toolName: 'subagent', details: { asyncId: 'first' } })
+  t.mock.timers.tick(9 * 60_000)
+  busy = false
+  h.ctx.isIdle = () => false
+  t.mock.timers.tick(16 * 60_000)
+  busy = true
+  h.emit('tool_result', { toolName: 'subagent', details: { asyncId: 'second' } })
+  h.ctx.isIdle = () => true
+  t.mock.timers.tick(5 * 60_000 + 50)
+  assert.deepEqual(
+    h.updates.map(update => update.state),
+    ['ready', 'active']
+  )
+  t.mock.timers.tick(60 * 60_000)
+  assert.equal(h.updates.at(-1).state, 'active', 'a single long-running job has no adapter runtime cap either')
+  busy = false
+  h.ctx.isIdle = () => false
+  t.mock.timers.tick(50)
+  assert.equal(h.updates.at(-1).state, 'active', 'native synthesis still holds the prompt')
+  h.ctx.isIdle = () => true
+  h.ctx.hasPendingMessages = () => true
+  t.mock.timers.tick(50)
+  assert.equal(h.updates.at(-1).state, 'active', 'pending delivery still holds the prompt')
+  h.ctx.hasPendingMessages = () => false
+  t.mock.timers.tick(50)
+  assert.equal(h.updates.at(-1).state, 'idle', 'only authoritative quiescence releases the prompt')
+  await h.command(`begin ${owner}`)
+  assert.equal(h.updates.at(-1).state, 'ready')
+})
+
 test('companion stops only owned live IDs, skips proven terminal IDs, rejects foreign ownership', async () => {
   const h = harness()
   let active = false
@@ -272,14 +310,17 @@ test('pre-existing same-session work is not adopted; ordinary Pi needs no option
 })
 
 for (const drain of [true, false]) {
-  test(`companion cancellation shares the caller deadline across slow status/stop/drain (${drain})`, async t => {
+  test(`companion cancellation keeps its deadline after long-running work and slow status/stop/drain (${drain})`, async t => {
     t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] })
     const h = harness()
+    t.after(() => h.emit('session_shutdown'))
     let busy = false
     h.register({ name: 'pi-subagents', sessionId: 'session', isActive: () => busy })
     await h.command(`begin ${owner}`)
     busy = true
     h.emit('tool_result', { toolName: 'subagent', details: { asyncId: 'owned' } })
+    t.mock.timers.tick(60 * 60_000)
+    assert.equal(h.updates.at(-1).state, 'active')
     let requests = 0
     h.events.on('subagents:rpc:v1:request', request => {
       requests++
