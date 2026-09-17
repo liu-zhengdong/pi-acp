@@ -1,6 +1,45 @@
-import { agent as acpAgent, methods, RequestError, type AgentApp } from '@agentclientprotocol/sdk'
+import {
+  agent as acpAgent,
+  methods,
+  RequestError,
+  type AgentApp,
+  type NewSessionRequest,
+  type LoadSessionRequest
+} from '@agentclientprotocol/sdk'
+import { McpConfigurationError, parseMcpServers } from '../pi-rpc/mcp-servers.js'
 import { PiAcpAgent, runPromptWithCancellation } from './agent.js'
 import { ClientConnection } from './client.js'
+
+// SDK 1.4 的默认解析器会丢弃无效 MCP 项；在原始请求边界校验，避免成功返回缺少能力的会话。
+function newSessionParams(value: unknown): NewSessionRequest {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw RequestError.invalidParams()
+  const request = value as Record<string, unknown>
+  if (typeof request.cwd !== 'string') throw RequestError.invalidParams({}, 'cwd 必须是字符串')
+  if (
+    request.additionalDirectories !== undefined &&
+    (!Array.isArray(request.additionalDirectories) ||
+      request.additionalDirectories.some(path => typeof path !== 'string'))
+  )
+    throw RequestError.invalidParams({}, 'additionalDirectories 必须是字符串数组')
+  if (
+    request._meta !== undefined &&
+    (typeof request._meta !== 'object' || request._meta === null || Array.isArray(request._meta))
+  )
+    throw RequestError.invalidParams({}, '_meta 必须是对象')
+  try {
+    return { ...request, cwd: request.cwd, mcpServers: parseMcpServers(request.mcpServers) }
+  } catch (error) {
+    if (error instanceof McpConfigurationError) throw RequestError.invalidParams({ reason: error.code }, error.message)
+    throw error
+  }
+}
+
+function existingSessionParams(value: unknown): LoadSessionRequest {
+  const request = newSessionParams(value)
+  const sessionId = (value as Record<string, unknown>).sessionId
+  if (typeof sessionId !== 'string' || !sessionId) throw RequestError.invalidParams({}, 'sessionId 必须是非空字符串')
+  return { ...request, sessionId }
+}
 
 /**
  * Builds the ACP agent app with exactly the methods this adapter implements
@@ -68,10 +107,12 @@ export function createPiAcpAgentApp(opts?: { onAgent?: (agent: PiAcpAgent | null
       }
     })
     .onRequest(methods.agent.authenticate, ctx => getInitializedAgent().authenticate(ctx.params))
-    .onRequest(methods.agent.session.new, ctx => getInitializedAgent().newSession(ctx.params))
-    .onRequest(methods.agent.session.load, ctx => getInitializedAgent().loadSession(ctx.params))
+    .onRequest(methods.agent.session.new, newSessionParams, ctx => getInitializedAgent().newSession(ctx.params))
+    .onRequest(methods.agent.session.load, existingSessionParams, ctx => getInitializedAgent().loadSession(ctx.params))
     .onRequest(methods.agent.session.list, ctx => getInitializedAgent().listSessions(ctx.params))
-    .onRequest(methods.agent.session.resume, ctx => getInitializedAgent().resumeSession(ctx.params))
+    .onRequest(methods.agent.session.resume, existingSessionParams, ctx =>
+      getInitializedAgent().resumeSession(ctx.params)
+    )
     .onRequest(methods.agent.session.close, ctx => getInitializedAgent().closeSession(ctx.params))
     .onRequest(methods.agent.session.delete, ctx => getInitializedAgent().deleteSession(ctx.params))
     .onRequest(methods.agent.session.setConfigOption, ctx => getInitializedAgent().setSessionConfigOption(ctx.params))

@@ -42,6 +42,7 @@ import {
 import { SessionStore } from './session-store.js'
 import { SessionRepository } from './session-repository.js'
 import { PiRpcProcess, PiRpcRequestTimeoutError } from '../pi-rpc/process.js'
+import { McpConfigurationError, parseMcpServers, type McpServer } from '../pi-rpc/mcp-servers.js'
 import { isThinkingLevel, type ThinkingLevel } from './thinking-levels.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { parseCommandArgs } from './slash-commands.js'
@@ -52,20 +53,23 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
 
-/**
- * pi has no MCP support (an extension would be required to bridge MCP
- * servers), so silently accepting `mcpServers` would hand the client a
- * session that is missing its requested tools. Reject explicitly before any
- * session side effects instead of degrading silently.
- */
-function assertNoMcpServers(mcpServers: readonly unknown[] | undefined): void {
-  if (!mcpServers?.length) return
-  throw RequestError.invalidParams(
-    { reason: 'MCP_SERVERS_UNSUPPORTED' },
-    `pi does not support MCP servers, so pi-acp cannot connect the ${mcpServers.length} requested MCP server(s). ` +
-      'Remove mcpServers from the session request. To use MCP tools with pi, configure them through a pi extension ' +
-      '(e.g. https://github.com/nicobailon/pi-mcp-adapter) instead.'
-  )
+function sessionMcpServers(value: unknown): McpServer[] {
+  try {
+    return parseMcpServers(value)
+  } catch (error) {
+    if (error instanceof McpConfigurationError) throw RequestError.invalidParams({ reason: error.code }, error.message)
+    throw error
+  }
+}
+
+async function configureMcp(proc: PiRpcProcess, servers: McpServer[], previouslyConfigured = false): Promise<void> {
+  if (!servers.length && !previouslyConfigured) return
+  try {
+    await proc.configureMcpServers(servers)
+  } catch (error) {
+    if (error instanceof McpConfigurationError) throw RequestError.internalError({ reason: error.code }, error.message)
+    throw error
+  }
 }
 
 function assertNoAdditionalDirectories(additionalDirectories: readonly string[] | undefined): void {
@@ -118,6 +122,7 @@ export class PiAcpAgent implements ACPAgent {
   private repository = new SessionRepository(this.store)
   private readonly sessions = new SessionManager(this.store)
   private readonly restoringSessions = new Map<string, Promise<PiAcpSession>>()
+  private readonly mcpServers = new Map<string, McpServer[]>()
   private readonly cancellationEpochs = new Map<string, number>()
   private readonly loadGenerations = new Map<string, number>()
   private readonly activePrompts = new Map<string, Set<Promise<void>>>()
@@ -156,6 +161,7 @@ export class PiAcpAgent implements ACPAgent {
     // its next await boundary dispose its fresh process instead of
     // registering it; disposeAll then closes everything already registered.
     this.disposed = true
+    this.mcpServers.clear()
     this.sessions.disposeAll()
   }
 
@@ -166,6 +172,7 @@ export class PiAcpAgent implements ACPAgent {
    */
   async disposeAndWait(timeoutMs: number): Promise<void> {
     this.disposed = true
+    this.mcpServers.clear()
     await this.sessions.disposeAllAndWait(timeoutMs)
   }
 
@@ -400,7 +407,10 @@ export class PiAcpAgent implements ACPAgent {
     throw RequestError.requestCancelled({}, `session is being deleted: ${sessionId}`)
   }
 
-  private async restoreSession(sessionId: string, opts?: { cwd?: string }): Promise<PiAcpSession> {
+  private async restoreSession(
+    sessionId: string,
+    opts?: { cwd?: string; mcpServers?: McpServer[] }
+  ): Promise<PiAcpSession> {
     this.assertNotDeleting(sessionId)
 
     const existing = this.sessions.maybeGet(sessionId)
@@ -440,7 +450,8 @@ export class PiAcpAgent implements ACPAgent {
         proc = await this.sessions.spawnOwned({
           cwd,
           sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
+          piCommand: process.env.PI_ACP_PI_COMMAND,
+          ...((opts?.mcpServers ?? this.mcpServers.get(sessionId) ?? []).length > 0 ? { mcpProxyOnly: true } : {})
         })
       } catch (e: unknown) {
         if (e instanceof Error && e.name === 'PiRpcSpawnError') {
@@ -500,6 +511,13 @@ export class PiAcpAgent implements ACPAgent {
         )
       }
 
+      try {
+        await configureMcp(proc, opts?.mcpServers ?? this.mcpServers.get(sessionId) ?? [])
+      } catch (error) {
+        this.sessions.retireProcess(sessionId, proc, [stored.sessionFile])
+        throw error
+      }
+
       // getOrCreate refuses registration after teardown and disposes `proc`
       // itself when a concurrently registered session wins the race.
       const session = this.sessions.getOrCreate(sessionId, {
@@ -542,7 +560,10 @@ export class PiAcpAgent implements ACPAgent {
    * and then use (or restore) the surviving state. The load itself calls
    * restoreSession directly and therefore never waits on itself.
    */
-  private async restoreSessionAwaitingLoads(sessionId: string, opts?: { cwd?: string }): Promise<PiAcpSession> {
+  private async restoreSessionAwaitingLoads(
+    sessionId: string,
+    opts?: { cwd?: string; mcpServers?: McpServer[] }
+  ): Promise<PiAcpSession> {
     while (true) {
       await this.waitForActiveLoads(sessionId)
       const observedGeneration = this.loadGenerations.get(sessionId) ?? 0
@@ -593,10 +614,7 @@ export class PiAcpAgent implements ACPAgent {
       // `createPiAcpAgentApp` (src/acp/app.ts): omitted capability = unsupported.
       agentCapabilities: {
         loadSession: true,
-        // pi has no MCP support; non-empty mcpServers are rejected explicitly
-        // in session/new, session/load, and session/resume (see README
-        // limitations), and no MCP transport capability is advertised.
-        mcpCapabilities: { http: false, sse: false },
+        mcpCapabilities: { http: true, sse: true },
         promptCapabilities: {
           image: true,
           audio: false,
@@ -614,11 +632,12 @@ export class PiAcpAgent implements ACPAgent {
 
   async newSession(params: NewSessionRequest) {
     assertValidSessionCwd(params.cwd)
-    assertNoMcpServers(params.mcpServers)
+    const mcpServers = sessionMcpServers(params.mcpServers)
     assertNoAdditionalDirectories(params.additionalDirectories)
 
     const session = await this.sessions.create({
       cwd: params.cwd,
+      ...(mcpServers.length > 0 ? { mcpProxyOnly: true } : {}),
       conn: this.conn,
       piCommand: process.env.PI_ACP_PI_COMMAND,
       supportsTerminalOutputMeta: this.supportsTerminalOutputMeta,
@@ -628,6 +647,7 @@ export class PiAcpAgent implements ACPAgent {
 
     let configOptions: Awaited<ReturnType<typeof getSessionConfiguration>>
     try {
+      await configureMcp(session.proc, mcpServers)
       // Fetch state + models once (parallel) to reduce startup latency.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- pi RPC payload is validated at this boundary.
       let state: any = null
@@ -681,6 +701,7 @@ export class PiAcpAgent implements ACPAgent {
 
       configOptions = await getSessionConfiguration(session.proc, { state, availableModels })
       session.seedSessionConfiguration(configOptions)
+      if (mcpServers.length && !this.disposed) this.mcpServers.set(session.sessionId, mcpServers)
     } catch (error) {
       await this.cleanupFailedNewSession(session.sessionId)
       throw error
@@ -890,7 +911,7 @@ export class PiAcpAgent implements ACPAgent {
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     assertValidSessionCwd(params.cwd)
-    assertNoMcpServers(params.mcpServers)
+    const mcpServers = sessionMcpServers(params.mcpServers)
     assertNoAdditionalDirectories(params.additionalDirectories)
 
     const cwd = params.cwd
@@ -910,10 +931,12 @@ export class PiAcpAgent implements ACPAgent {
         this.assertLoadActive(params.sessionId, generation)
       }
 
-      const session = await this.restoreSession(params.sessionId, { cwd })
+      const session = await this.restoreSession(params.sessionId, { cwd, mcpServers })
       try {
         this.assertLoadActive(params.sessionId, generation)
         const proc = session.proc
+        await configureMcp(proc, mcpServers, this.mcpServers.has(params.sessionId))
+        this.assertLoadActive(params.sessionId, generation)
 
         await replaySessionHistory({
           session,
@@ -926,6 +949,8 @@ export class PiAcpAgent implements ACPAgent {
         const configOptions = await getSessionConfiguration(proc)
         this.assertLoadActive(params.sessionId, generation)
         session.seedSessionConfiguration(configOptions)
+        if (mcpServers.length) this.mcpServers.set(params.sessionId, mcpServers)
+        else this.mcpServers.delete(params.sessionId)
 
         const response = {
           configOptions,
@@ -960,16 +985,19 @@ export class PiAcpAgent implements ACPAgent {
 
   async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
     assertValidSessionCwd(params.cwd)
-    assertNoMcpServers(params.mcpServers)
+    const mcpServers = sessionMcpServers(params.mcpServers)
     assertNoAdditionalDirectories(params.additionalDirectories)
 
     const cwd = params.cwd
 
-    const session = await this.restoreSessionAwaitingLoads(params.sessionId, { cwd })
+    const session = await this.restoreSessionAwaitingLoads(params.sessionId, { cwd, mcpServers })
+    await configureMcp(session.proc, mcpServers, this.mcpServers.has(params.sessionId))
 
     // Unlike session/load, resume MUST NOT replay conversation history.
     const configOptions = await getSessionConfiguration(session.proc)
     session.seedSessionConfiguration(configOptions)
+    if (mcpServers.length && !this.disposed) this.mcpServers.set(params.sessionId, mcpServers)
+    else this.mcpServers.delete(params.sessionId)
 
     this.advertiseCommandsSoon(session)
 
@@ -989,6 +1017,7 @@ export class PiAcpAgent implements ACPAgent {
     // Close admission synchronously, cancel all prompt paths, dispose at the
     // normal lifecycle point, and wait for their ACP responses to settle.
     await this.beginSessionClose(params.sessionId)
+    this.mcpServers.delete(params.sessionId)
 
     // Closing an unknown or already-closed session succeeds silently.
     return {}
@@ -1044,6 +1073,7 @@ export class PiAcpAgent implements ACPAgent {
 
   async deleteSession(params: DeleteSessionRequest): Promise<DeleteSessionResponse> {
     await this.beginSessionDelete(params.sessionId)
+    this.mcpServers.delete(params.sessionId)
 
     // Deleting an unknown or already-deleted session succeeds silently.
     return {}
