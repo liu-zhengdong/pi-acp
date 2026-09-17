@@ -1,6 +1,6 @@
 {
-  "name": "@regadas/pi-acp",
-  "version": "0.1.0",
+  "name": "@liuser/pi-acp",
+  "version": "0.1.1",
   "description": "ACP adapter for pi coding agent",
   "license": "MIT",
   "author": "Sergii Kozak <svkozak@gmail.com>",
@@ -9,16 +9,16 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/regadas/pi-acp.git"
+    "url": "https://github.com/liu-zhengdong/pi-acp.git"
   },
   "publishConfig": {
     "access": "public",
     "provenance": true
   },
   "bugs": {
-    "url": "https://github.com/regadas/pi-acp/issues"
+    "url": "https://github.com/liu-zhengdong/pi-acp/issues"
   },
-  "homepage": "https://github.com/regadas/pi-acp#readme",
+  "homepage": "https://github.com/liu-zhengdong/pi-acp#readme",
   "keywords": [
     "acp",
     "agent-client-protocol",
