@@ -1,11 +1,16 @@
 import { randomUUID } from 'node:crypto'
+import { registerMcpBridge } from './mcp-extension.js'
 
 // Public Pi extension surface only; Pi is supplied by the user's installation.
 type Context = {
   mode?: string
   isIdle(): boolean
   hasPendingMessages(): boolean
-  sessionManager: { getSessionId(): string; getSessionFile(): string | undefined }
+  sessionManager: {
+    getSessionId(): string
+    getSessionFile(): string | undefined
+    getBranch?(): Array<{ type: string; customType?: string }>
+  }
   ui: { setWidget(key: string, lines: string[] | undefined): void }
 }
 type Provider = { name: string; sessionId: string; sessionFile?: string; isActive(): boolean }
@@ -46,6 +51,7 @@ function nestedStatus(text: unknown, id: string): { parent: string; root: string
 
 /** Adapter-owned bridge to pi-subagents' optional v1 host liveness/stop contracts. */
 export default function acpExtension(pi: Pi): void {
+  registerMcpBridge(pi)
   const globals = globalThis as Record<symbol, unknown>
   const previous = globals[REGISTRY] as { version?: unknown; register?: (provider: Provider) => () => void } | undefined
   if (previous !== undefined && (previous.version !== 1 || typeof previous.register !== 'function'))

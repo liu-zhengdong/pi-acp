@@ -4,13 +4,13 @@
 
 It translates ACP JSON-RPC 2.0 messages over stdio into commands for `pi --mode rpc`. It then streams pi events back to the client.
 
-`pi-acp` is an independent fork of [svkozak/pi-acp](https://github.com/svkozak/pi-acp). It retains the original project's Git history and MIT attribution.
+本仓库基于 [regadas/pi-acp](https://github.com/regadas/pi-acp)，保留其与原始 [svkozak/pi-acp](https://github.com/svkozak/pi-acp) 的 Git 历史及 MIT 署名。新增能力是通过配套的 pi-mcp-adapter，为 ACP 会话增量接入外部 MCP 服务。
 
-The project is separate from the original repository and the unscoped `pi-acp` npm package. Future releases will use the scoped package name `@regadas/pi-acp`. The package is not published yet.
+本 fork 尚未发布 npm 包，包名暂沿用 `@regadas/pi-acp`；请从本仓库构建，不要将 npm 的同名或无作用域包当作本实现。
 
 ## Status
 
-`pi-acp` targets the stable ACP v1 core using the current `@agentclientprotocol/sdk` builder API. It implements the baseline prompt lifecycle plus stable session list, load, resume, close, and delete methods. It is not fully ACP v1 conformant because client-provided stdio MCP servers are not supported: pi itself has no MCP support, so requests with a non-empty `mcpServers` list are rejected explicitly instead of being silently ignored; see [Limitations](#limitations).
+`pi-acp` 面向 ACP v1，使用 `@agentclientprotocol/sdk` 的 builder API，提供消息执行及会话列表、加载、恢复、关闭和删除。非空 `mcpServers` 通过支持固定代理模式的 pi-mcp-adapter 接入；缺少或不兼容的 adapter 会明确报错。接入条件见 [ACP 会话 MCP 服务](#acp-会话-mcp-服务)，其余边界见 [Limitations](#limitations)。
 
 Development is centered around [Zed](https://zed.dev) editor support, and other clients may have varying levels of compatibility. Expect some minor breaking changes.
 
@@ -60,7 +60,7 @@ This independently maintained version is not currently published in the ACP Regi
 ### From source
 
 ```bash
-git clone https://github.com/regadas/pi-acp.git
+git clone https://github.com/liu-zhengdong/pi-acp.git
 cd pi-acp
 npm ci
 npm run build
@@ -101,6 +101,28 @@ Alternatively, point Zed directly to the built entry point without linking it:
   }
 }
 ```
+
+### ACP 会话 MCP 服务
+
+需要加载 [配套 pi-mcp-adapter](https://github.com/liu-zhengdong/pi-mcp-adapter)，其运行时注册回执必须支持 `toolExposure: "proxy-only"`。仅安装上游 2.34.0 不满足此条件；请在专用 Pi 配置目录中引用构建／检出的扩展，不覆盖日常全局安装。
+
+客户端在 `session/new`、`session/load` 或 `session/resume` 中传入标准 `mcpServers` 描述，支持 stdio、Streamable HTTP 与 SSE。适配器会校验描述，通过 Pi 内部扩展命令进行运行时注册；注册命令不进入模型对话。
+
+- 新建或重新启动的、带外部 MCP 的 Pi 子进程使用 `PI_MCP_TOOL_EXPOSURE=proxy-only`，不修改父进程环境或 MCP 配置文件。业务工具经固定 `mcp`／可选 `mcpScript` 发现和调用，不新增业务工具或 namespace 工具。
+- 原有 MCP 服务仍可通过代理调用；名称冲突拒绝接入，不覆盖配置。失败时回滚本次注册，关闭时仅释放桥接持有的服务。
+- 简短使用说明追加到下一轮上下文，具体参数从代理的发现／描述结果读取，不改写 system prompt。服务地址、headers 和 env 不加入这段说明。
+- 服务列表以当前 ACP 请求为准；恢复时重新提供连接描述，不新增 pi-acp 自有的 MCP 配置存储。上游已有 Session 映射和 MCP adapter 的元数据缓存行为保持原样。
+- 空列表保留原有启动方式，不强制安装 MCP adapter。已按普通模式运行的 Pi 不能原地变成固定代理模式；需要先关闭该会话的进程，再以非空列表恢复。代理模式只约束本 adapter 的 MCP 工具，不约束其他扩展。
+- 本功能接入会话建立／恢复的服务列表，不提供运行中添加新 MCP 端点的独立 ACP 方法。已接入服务的工具目录变化继续使用 MCP 的通知与刷新机制。
+
+本地确定性验收入口（真实 Pi 和 MCP adapter，模型输出为本地夹具，不调用外部模型）：
+
+```bash
+npm run build
+PI_ACP_MCP_EXTENSION=/absolute/path/to/pi-mcp-adapter/index.ts npm run smoke:mcp
+```
+
+验收使用临时 Pi 配置，检查原服务保留、三种传输、动态工具、关闭后恢复、实际模型 `tools` 和 system prompt 的稳定性，以及坏输入拒绝。输出证据目录和源码哈希；脚本不改动用户原配置。
 
 ### Environment variables
 
@@ -164,8 +186,8 @@ Project layout:
 
 - No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally. Bash tool calls are rendered through Zed's `_meta.terminal_output` convention only when the client negotiates it; otherwise output is plain tool content.
 - Terminal login is advertised only to clients that declare the (unstable) `clientCapabilities.auth.terminal` capability; Zed's `_meta["terminal-auth"]` launch banner additionally requires its matching client `_meta` flag.
-- ACP v1 requires agents to connect client-provided stdio MCP servers, but pi has no MCP support (it would require a pi extension to bridge them). `pi-acp` therefore rejects `session/new`, `session/load`, and `session/resume` requests that carry a non-empty `mcpServers` list with an explicit `invalid params` error instead of silently ignoring the requested servers; empty lists are accepted. This remains an explicit protocol conformance gap. Installing the [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) makes separately configured MCP servers available to pi, but does not wire the ACP request's `mcpServers` automatically.
-- ACP fork, steering/follow-up methods, MCP, additional directories, subagent lineage, goals/AIR, interactive terminal stdin, and sandbox/approval modes are not advertised because current pi RPC cannot safely provide those semantics. Adapter `/steering` and `/follow-up` commands only configure pi queue delivery modes.
+- ACP MCP 依赖支持固定代理回执的配套 Pi 扩展；能力声明不代表环境已经安装它。缺少／不兼容 adapter、名称冲突、超大或畸形描述均明确失败，不返回缺少所请求工具的降级会话。
+- ACP fork、steering/follow-up 方法、additional directories、subagent lineage、goals/AIR、交互终端 stdin 和 sandbox/approval modes 尚未声明，当前 Pi RPC 无法安全提供这些完整语义。 Adapter `/steering` and `/follow-up` commands only configure pi queue delivery modes.
 - On Windows, native executables launch directly. `.cmd`/`.bat` launchers necessarily pass through `cmd.exe`; pi-acp builds an escaped argument boundary and never enables Node's `shell` mode.
 - Additional workspace directories are not supported: the `sessionCapabilities.additionalDirectories` capability is not advertised, and `session/new`, `session/load`, and `session/resume` requests carrying a non-empty `additionalDirectories` list are rejected with `invalid params` instead of silently dropping the extra roots. The session's `cwd` remains the only workspace root.
 - Pi session files do not coordinate concurrent writers: each pi process keeps its own in-memory view while appending to the shared history. `pi-acp` inherits this constraint, so simultaneously operating on the same persisted session from multiple `pi-acp` or pi processes is unsupported. Atomic adapter mapping records prevent cross-process map updates from being lost, but they are not a session-ownership lease; keep one active writer per persisted session to prevent divergent or damaged history.

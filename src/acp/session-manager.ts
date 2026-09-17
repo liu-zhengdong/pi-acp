@@ -13,6 +13,7 @@ import { toRequestError } from './session-errors.js'
 type SessionCreateParams = {
   [key: string]: unknown
   cwd: string
+  mcpProxyOnly?: boolean
   conn: AcpClient
   piCommand?: string
   /** Client negotiated Zed's `_meta.terminal_output` tool rendering convention. */
@@ -134,6 +135,7 @@ export class SessionManager {
    */
   spawnOwned(params: {
     cwd: string
+    mcpProxyOnly?: boolean
     sessionPath?: string
     sessionDirectory?: string
     piCommand?: string
@@ -328,7 +330,8 @@ export class SessionManager {
       proc = await this.spawnOwned({
         cwd: params.cwd,
         sessionDirectory: resolveSessionDirectory(params.cwd).path,
-        piCommand: params.piCommand
+        piCommand: params.piCommand,
+        ...(params.mcpProxyOnly ? { mcpProxyOnly: true } : {})
       })
     } catch (e) {
       if (e instanceof PiRpcSpawnError) {

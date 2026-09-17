@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { MCP_COMMAND, MCP_WIDGET, McpConfigurationError, type McpServer } from './mcp-servers.js'
 import { existsSync, mkdirSync, writeFileSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -96,6 +98,8 @@ type PiExtensionUiResponse =
 
 type SpawnParams = {
   cwd: string
+  /** 为带外部 MCP 的子进程选择固定代理，不修改父进程或配置文件。 */
+  mcpProxyOnly?: boolean
   sessionDirectory?: string
   /** Optional override for `pi` executable name/path */
   piCommand?: string
@@ -381,7 +385,7 @@ export class PiRpcProcess {
     const child = spawn(invocation.executable, invocation.args, {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: process.env,
+      env: params.mcpProxyOnly ? { ...process.env, PI_MCP_TOOL_EXPOSURE: 'proxy-only' } : process.env,
       shell: false,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments
     })
@@ -542,9 +546,67 @@ export class PiRpcProcess {
   }
 
   private bridgeReady: Promise<void> | undefined
+  private mcpConfiguration: string | undefined
+  private mcpUpdating = false
+
+  async configureMcpServers(servers: readonly McpServer[]): Promise<void> {
+    const configuration = JSON.stringify(servers)
+    if (configuration === this.mcpConfiguration || (!servers.length && this.mcpConfiguration === undefined)) return
+    if (this.mcpUpdating) throw new McpConfigurationError('MCP_SESSION_BUSY', 'MCP 配置正在更新')
+    this.mcpUpdating = true
+    let unsubscribe: (() => void) | undefined
+    try {
+      const raw = (await this.getCommands()) as { commands?: Array<{ name?: unknown }> }
+      if (!Array.isArray(raw.commands) || !raw.commands.some(command => command.name === MCP_COMMAND))
+        throw new McpConfigurationError(
+          'MCP_BRIDGE_UNAVAILABLE',
+          'Pi 未加载 ACP MCP 桥接扩展；拒绝把服务配置发送给模型'
+        )
+      const id = randomUUID()
+      let acknowledgement: { success?: unknown; code?: unknown; message?: unknown } | undefined
+      unsubscribe = this.onEvent(event => {
+        if (event.type !== 'extension_ui_request' || event.method !== 'setWidget' || event.widgetKey !== MCP_WIDGET)
+          return
+        const lines = event.widgetLines
+        if (!Array.isArray(lines) || lines.length !== 1 || typeof lines[0] !== 'string') return
+        try {
+          const response = JSON.parse(lines[0]) as {
+            version?: unknown
+            id?: unknown
+            success?: unknown
+            code?: unknown
+            message?: unknown
+          }
+          if (response.version === 1 && response.id === id) acknowledgement = response
+        } catch {
+          /* 非本次请求的回执不参与状态判断。 */
+        }
+      })
+      const payload = Buffer.from(JSON.stringify({ version: 1, id, servers })).toString('base64url')
+      const response = await this.request({ type: 'prompt', message: `/${MCP_COMMAND} ${payload}` })
+      if (!response.success || !acknowledgement) {
+        this.dispose({ expected: false })
+        throw new McpConfigurationError('MCP_BRIDGE_UNAVAILABLE', 'MCP 注册未收到有效回执，已关闭不确定状态的 Pi 进程')
+      }
+      if (acknowledgement.success !== true) {
+        const code = typeof acknowledgement.code === 'string' ? acknowledgement.code : 'MCP_REGISTRATION_FAILED'
+        if (code === 'MCP_ROLLBACK_FAILED' || code === 'MCP_ADAPTER_INCOMPATIBLE') this.dispose({ expected: false })
+        throw new McpConfigurationError(code, 'MCP 服务注册失败；请检查 adapter 兼容性、服务重名和会话状态')
+      }
+      this.mcpConfiguration = configuration
+    } catch (error) {
+      if (error instanceof McpConfigurationError) throw error
+      this.dispose({ expected: false })
+      throw new McpConfigurationError('MCP_BRIDGE_UNAVAILABLE', 'MCP 注册通信失败，已关闭不确定状态的 Pi 进程')
+    } finally {
+      unsubscribe?.()
+      this.mcpUpdating = false
+    }
+  }
 
   async prompt(message: string, images: unknown[] = [], onAccepted?: () => void, owner?: string): Promise<void> {
-    if (/^\/pi-acp-control(?:\s|$)/.test(message)) throw new Error('pi-acp-control is reserved for the adapter')
+    if (/^\/pi-acp-(?:control|mcp)(?:\s|$)/.test(message))
+      throw new Error('pi-acp internal commands are reserved for the adapter')
     if (owner) {
       this.bridgeReady ??= this.getCommands().then(raw => {
         const commands = (raw as { commands?: Array<{ name?: unknown }> })?.commands

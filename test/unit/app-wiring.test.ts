@@ -47,7 +47,7 @@ test('app wiring: initialize advertises exactly the implemented capabilities', a
   assert.equal(res.protocolVersion, 1)
   assert.equal(res.agentInfo?.name, 'pi-acp')
   assert.equal(res.agentCapabilities?.loadSession, true)
-  assert.deepEqual(res.agentCapabilities?.mcpCapabilities, { http: false, sse: false })
+  assert.deepEqual(res.agentCapabilities?.mcpCapabilities, { http: true, sse: true })
   assert.deepEqual(res.agentCapabilities?.promptCapabilities, {
     image: true,
     audio: false,
