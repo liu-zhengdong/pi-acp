@@ -38,12 +38,12 @@ jobs:
           fi
 
           {
-            echo "## Changes"
+            echo "## 更新内容"
             echo ""
             git log --pretty=format:"- %s (%h)" "$RANGE"
             echo ""
             echo ""
-            echo "[Full Changelog](${CHANGELOG_URL})"
+            echo "[完整变更记录](${CHANGELOG_URL})"
           } > release-notes.md
 
       - name: Create GitHub Release

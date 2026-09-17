@@ -6,7 +6,14 @@ It translates ACP JSON-RPC 2.0 messages over stdio into commands for `pi --mode 
 
 本仓库基于 [regadas/pi-acp](https://github.com/regadas/pi-acp)，保留其与原始 [svkozak/pi-acp](https://github.com/svkozak/pi-acp) 的 Git 历史及 MIT 署名。新增能力是通过配套的 pi-mcp-adapter，为 ACP 会话增量接入外部 MCP 服务。
 
-本 fork 尚未发布 npm 包，包名暂沿用 `@regadas/pi-acp`；请从本仓库构建，不要将 npm 的同名或无作用域包当作本实现。
+本 fork 使用独立 npm 包名 `@liuser/pi-acp`，CLI 仍叫 `pi-acp`；不要将 `@regadas/pi-acp` 或无作用域同名包当作本实现。
+
+```bash
+npm install -g @liuser/pi-acp
+pi install npm:@liuser/pi-mcp-adapter
+```
+
+第二条安装提供 MCP 能力的配套 Pi 扩展，ACP 本身是 CLI，不需要作为日常 Pi 插件重复加载。已有无作用域 MCP adapter 时，应先用 `pi remove npm:pi-mcp-adapter` 移除旧包的加载项，再安装 scoped 版本；MCP 配置和认证不需要迁移。
 
 ## Status
 
@@ -104,7 +111,7 @@ Alternatively, point Zed directly to the built entry point without linking it:
 
 ### ACP 会话 MCP 服务
 
-需要加载 [配套 pi-mcp-adapter](https://github.com/liu-zhengdong/pi-mcp-adapter)，其运行时注册回执必须支持 `toolExposure: "proxy-only"`。仅安装上游 2.34.0 不满足此条件；请在专用 Pi 配置目录中引用构建／检出的扩展，不覆盖日常全局安装。
+需要加载 [配套 pi-mcp-adapter](https://github.com/liu-zhengdong/pi-mcp-adapter)，npm 包为 `@liuser/pi-mcp-adapter`（本功能从 2.34.1 提供），运行时注册回执必须支持 `toolExposure: "proxy-only"`。仅安装上游无作用域包 2.34.0 不满足此条件。可通过 Pi 包管理器安装，也可在专用 Pi 配置目录中引用检出的扩展。
 
 客户端在 `session/new`、`session/load` 或 `session/resume` 中传入标准 `mcpServers` 描述，支持 stdio、Streamable HTTP 与 SSE。适配器会校验描述，通过 Pi 内部扩展命令进行运行时注册；注册命令不进入模型对话。
 
