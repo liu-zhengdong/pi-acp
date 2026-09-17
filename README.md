@@ -15,6 +15,20 @@ pi install npm:@liuser/pi-mcp-adapter
 
 第二条安装提供 MCP 能力的配套 Pi 扩展，ACP 本身是 CLI，不需要作为日常 Pi 插件重复加载。已有无作用域 MCP adapter 时，应先用 `pi remove npm:pi-mcp-adapter` 移除旧包的加载项，再安装 scoped 版本；MCP 配置和认证不需要迁移。
 
+## 上游同步
+
+GitHub Actions 每 6 小时检查 `regadas/pi-acp` 的最新稳定 GitHub Release，发现本仓库尚未包含的提交后创建草稿 PR。不会自动合入、发布 npm 或替换安装。
+
+审阅差异、解决冲突后，点击 **Ready for review** 触发 CI，再决定合入。每个 tag 使用独立分支；已关闭的 PR 不重复创建，用户修改过的分支不被强推。仅 npm 发版但未创建 GitHub Release 的更新不在检测范围内。
+
+手动检查：Actions → **上游版本同步** → **Run workflow**。默认 `dry_run=true`，只显示检查结果；取消勾选才会创建分支和 PR。
+
+```bash
+gh workflow run upstream-sync.yml -R liu-zhengdong/pi-acp --ref main -f dry_run=true
+```
+
+仓库需启用 Actions，并允许 GitHub Actions 创建 PR（设置项同时包含审批权限，但本流程不审批）。工作流只使用仓库 `GITHUB_TOKEN`；不需要个人 token。GitHub 对长期无活动的公共仓库可能停用定时工作流，届时需在 Actions 页面重新启用。
+
 ## Status
 
 `pi-acp` 面向 ACP v1，使用 `@agentclientprotocol/sdk` 的 builder API，提供消息执行及会话列表、加载、恢复、关闭和删除。非空 `mcpServers` 通过支持固定代理模式的 pi-mcp-adapter 接入；缺少或不兼容的 adapter 会明确报错。接入条件见 [ACP 会话 MCP 服务](#acp-会话-mcp-服务)，其余边界见 [Limitations](#limitations)。
@@ -62,7 +76,7 @@ npm install -g @earendil-works/pi-coding-agent
 
 ## Install
 
-This independently maintained version is not currently published in the ACP Registry or on npm. The Registry entry and unscoped `pi-acp` npm package install the upstream project, not this repository.
+本 fork 已发布 npm 包 `@liuser/pi-acp`，安装命令见文首。尚未作为本 fork 独立登记到 ACP Registry；Registry 既有入口和无作用域 `pi-acp` npm 包不能当作本仓库版本。
 
 ### From source
 

@@ -1,0 +1,44 @@
+name: 上游版本同步
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 仅检查，不创建分支或 PR
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-release-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+      - run: node --test scripts/upstream-sync.test.mjs
+      - uses: actions/github-script@v7
+        env:
+          UPSTREAM_REPO: regadas/pi-acp
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        with:
+          script: |
+            const { syncUpstream } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/upstream-sync.mjs`);
+            const result = await syncUpstream({ github, ...context.repo,
+              upstream: process.env.UPSTREAM_REPO, dryRun: process.env.DRY_RUN === 'true' });
+            core.info(JSON.stringify(result, null, 2));
+            await core.summary.addHeading('上游版本检查').addCodeBlock(JSON.stringify(result, null, 2), 'json').write();

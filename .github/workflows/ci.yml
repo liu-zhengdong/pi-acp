@@ -3,6 +3,7 @@ name: CI
 on:
   workflow_dispatch:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: ['**']
 
@@ -15,6 +16,7 @@ jobs:
         with:
           node-version: '22.19.0'
           cache: npm
+      - run: node --test scripts/upstream-sync.test.mjs
       - run: npm ci
       - run: npm run validate
       - run: npm install --global @earendil-works/pi-coding-agent@^0.84.3
