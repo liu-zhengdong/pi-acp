@@ -11,7 +11,7 @@ import {
 
 type Registration = { readonly toolExposure?: string; dispose(): Promise<void> }
 type Owned = { server: McpServer; registration: Registration }
-type Context = {
+export type McpContext = {
   isIdle(): boolean
   hasPendingMessages(): boolean
   sessionManager?: { getBranch?(): Array<{ type: string; customType?: string }> }
@@ -19,14 +19,15 @@ type Context = {
 }
 export type McpExtensionApi = {
   events: { emit(name: string, data: unknown): void }
-  on(name: string, handler: (event: unknown, ctx: Context) => unknown): void
+  on(name: string, handler: (event: unknown, ctx: McpContext) => unknown): void
   registerCommand(
     name: string,
-    command: { description: string; handler(args: string, ctx: Context): Promise<void> }
+    command: { description: string; handler(args: string, ctx: McpContext): Promise<void> }
   ): void
 }
 
-export function registerMcpBridge(pi: McpExtensionApi): void {
+export function registerMcpBridge(pi: McpExtensionApi) {
+  let generation = 0
   let owned = new Map<string, Owned>()
   let updating = false
   let closing = false
@@ -77,6 +78,77 @@ export function registerMcpBridge(pi: McpExtensionApi): void {
     return results.every(result => result.status === 'fulfilled')
   }
 
+  const updates = new Set<Promise<void>>()
+  const configureCore = async (value: unknown, ctx: McpContext, appendWhileBusy: boolean) => {
+    const servers = parseMcpServers(value)
+    const epoch = generation
+    if (closing || poisoned)
+      throw new McpConfigurationError('MCP_BRIDGE_UNAVAILABLE', 'MCP 注册桥接不可用，请重新加载会话')
+    if (
+      updating ||
+      ((!ctx.isIdle() || ctx.hasPendingMessages()) &&
+        (!appendWhileBusy ||
+          [...owned].some(
+            ([name, entry]) =>
+              !servers.some(server => server.name === name && JSON.stringify(server) === JSON.stringify(entry.server))
+          )))
+    )
+      throw new McpConfigurationError('MCP_SESSION_BUSY', '会话忙碌，暂不能更新 MCP 服务')
+    updating = true
+    const previous = owned
+    const next = new Map<string, Owned>()
+    const added: Owned[] = []
+    const removed: Owned[] = []
+    try {
+      for (const server of servers) {
+        if (closing || epoch !== generation) throw new McpConfigurationError('MCP_BRIDGE_UNAVAILABLE', '会话正在关闭')
+        const existing = previous.get(server.name)
+        if (existing && JSON.stringify(existing.server) === JSON.stringify(server)) {
+          next.set(server.name, existing)
+          continue
+        }
+        if (existing) {
+          removed.push(existing)
+          await existing.registration.dispose()
+        }
+        const entry = await register(server)
+        added.push(entry)
+        next.set(server.name, entry)
+      }
+      for (const [name, entry] of previous) {
+        if (next.has(name)) continue
+        removed.push(entry)
+        await entry.registration.dispose()
+      }
+      if (closing || epoch !== generation) throw new McpConfigurationError('MCP_BRIDGE_UNAVAILABLE', '会话正在关闭')
+      owned = next
+      noticePending = true
+    } catch (error) {
+      let restored = await release(added)
+      if (!closing && epoch === generation) {
+        for (const entry of removed) {
+          try {
+            previous.set(entry.server.name, await register(entry.server))
+          } catch {
+            restored = false
+          }
+        }
+      }
+      poisoned ||= !restored
+      if (poisoned) throw new McpConfigurationError('MCP_ROLLBACK_FAILED', 'MCP 注册回滚失败，请重新加载会话')
+      throw error
+    } finally {
+      if (epoch === generation) updating = false
+    }
+  }
+
+  const configure = (value: unknown, ctx: McpContext, appendWhileBusy = false) => {
+    const task = configureCore(value, ctx, appendWhileBusy)
+    updates.add(task)
+    void task.finally(() => updates.delete(task)).catch(() => undefined)
+    return task
+  }
+
   pi.registerCommand(MCP_COMMAND, {
     description: '内部 ACP MCP 注册桥接',
     async handler(args, ctx) {
@@ -94,58 +166,8 @@ export function registerMcpBridge(pi: McpExtensionApi): void {
         if (request?.version !== 1 || typeof request.id !== 'string' || !/^[a-f0-9-]{36}$/.test(request.id))
           throw new McpConfigurationError('INVALID_MCP_SERVERS', '无效的 MCP 请求标识')
         id = request.id
-        const servers = parseMcpServers(request.servers)
-        if (closing || poisoned)
-          throw new McpConfigurationError('MCP_BRIDGE_UNAVAILABLE', 'MCP 注册桥接不可用，请重新加载会话')
-        if (updating || !ctx.isIdle() || ctx.hasPendingMessages())
-          throw new McpConfigurationError('MCP_SESSION_BUSY', '会话忙碌，暂不能更新 MCP 服务')
-        updating = true
-        const previous = owned
-        const next = new Map<string, Owned>()
-        const added: Owned[] = []
-        const removed: Owned[] = []
-        try {
-          for (const server of servers) {
-            if (closing) throw new McpConfigurationError('MCP_BRIDGE_UNAVAILABLE', '会话正在关闭')
-            const existing = previous.get(server.name)
-            if (existing && JSON.stringify(existing.server) === JSON.stringify(server)) {
-              next.set(server.name, existing)
-              continue
-            }
-            if (existing) {
-              removed.push(existing)
-              await existing.registration.dispose()
-            }
-            const entry = await register(server)
-            added.push(entry)
-            next.set(server.name, entry)
-          }
-          for (const [name, entry] of previous) {
-            if (next.has(name)) continue
-            removed.push(entry)
-            await entry.registration.dispose()
-          }
-          if (closing) throw new McpConfigurationError('MCP_BRIDGE_UNAVAILABLE', '会话正在关闭')
-          owned = next
-          noticePending = true
-          reply(true)
-        } catch (error) {
-          let restored = await release(added)
-          if (!closing) {
-            for (const entry of removed) {
-              try {
-                previous.set(entry.server.name, await register(entry.server))
-              } catch {
-                restored = false
-              }
-            }
-          }
-          poisoned ||= !restored
-          if (poisoned) throw new McpConfigurationError('MCP_ROLLBACK_FAILED', 'MCP 注册回滚失败，请重新加载会话')
-          throw error
-        } finally {
-          updating = false
-        }
+        await configure(request.servers, ctx)
+        reply(true)
       } catch (error) {
         const known = error instanceof McpConfigurationError
         reply(
@@ -157,7 +179,7 @@ export function registerMcpBridge(pi: McpExtensionApi): void {
     }
   })
 
-  pi.on('before_agent_start', (_event, ctx) => {
+  const notice = (ctx: McpContext) => {
     if (!checkedHistory) {
       checkedHistory = true
       noticePending ||=
@@ -180,11 +202,51 @@ export function registerMcpBridge(pi: McpExtensionApi): void {
           : '本次 ACP 连接未提供额外 MCP 服务；原有配置的服务保持可用。历史中的 ACP 服务提示不代表本次连接仍提供这些服务。'
       }
     }
+  }
+  pi.on('before_agent_start', (_event, ctx) => notice(ctx))
+  pi.on('session_start', () => {
+    generation++
+    closing = false
+    poisoned = false
+    updating = false
+    checkedHistory = false
+    noticePending = false
   })
   pi.on('session_shutdown', async () => {
+    generation++
     closing = true
+    await Promise.allSettled([...updates])
     const current = owned
     owned = new Map()
     if (!(await release(current.values()))) console.error('pi-acp: MCP 注册释放失败')
   })
+  return {
+    configure,
+    notice,
+    async add(value: unknown, ctx: McpContext) {
+      const before = new Set(owned.values())
+      const servers = parseMcpServers(value)
+      for (const server of servers) {
+        const existing = owned.get(server.name)
+        if (existing && JSON.stringify(existing.server) !== JSON.stringify(server))
+          throw new McpConfigurationError('MCP_SERVER_CONFLICT', `MCP 服务名称冲突：${server.name}`)
+      }
+      await configure(
+        [...owned.values()]
+          .map(entry => entry.server)
+          .filter(server => !servers.some(addition => addition.name === server.name))
+          .concat(servers),
+        ctx,
+        true
+      )
+      const additions = new Set([...owned.values()].filter(entry => !before.has(entry)))
+      if (!additions.size) return undefined
+      return async (context: McpContext) => {
+        await configure(
+          [...owned.values()].filter(entry => !additions.has(entry)).map(entry => entry.server),
+          context
+        )
+      }
+    }
+  }
 }

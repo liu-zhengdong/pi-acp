@@ -1,6 +1,6 @@
 {
   "name": "@liuser/pi-acp",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "ACP adapter for pi coding agent",
   "license": "MIT",
   "author": "Sergii Kozak <svkozak@gmail.com>",
@@ -36,9 +36,15 @@
   "files": [
     "dist"
   ],
+  "pi": {
+    "extensions": [
+      "./dist/pi-extension.js"
+    ]
+  },
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsup",
+    "prepare": "npm run build",
     "start": "node dist/index.js",
     "format": "prettier . --write",
     "format:check": "prettier . --check",
@@ -47,6 +53,7 @@
     "test": "node scripts/test.mjs",
     "smoke": "node scripts/smoke-acp.mjs",
     "smoke:mcp": "node scripts/smoke-mcp.mjs",
+    "smoke:runtime": "node scripts/smoke-runtime.mjs",
     "eval:acp": "npm run build && node scripts/eval-zed-acp.mjs",
     "validate": "npm run format:check && npm run typecheck && npm run lint && npm test && npm run build",
     "prepack": "npm run validate",

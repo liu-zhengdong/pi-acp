@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs'
-import { open, readdir, stat, unlink } from 'node:fs/promises'
+import { open, readdir, realpath, stat, unlink } from 'node:fs/promises'
 import { dirname, join, isAbsolute, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { getAgentDir, getMergedPiSettings } from './pi-settings.js'
@@ -260,6 +260,25 @@ export class SessionRepository {
     private readonly env: NodeJS.ProcessEnv = process.env,
     private readonly agentDir = getAgentDir()
   ) {}
+
+  /** Register an explicitly supplied legacy Pi history; never modify its contents. */
+  async importFile(cwd: string, sessionFile: string): Promise<{ sessionId: string }> {
+    if (!isAbsolute(cwd) || !isAbsolute(sessionFile) || !sessionFile.endsWith('.jsonl'))
+      throw new Error('Import requires absolute cwd and a Pi JSONL file')
+    const path = await realpath(sessionFile)
+    const header = await validatedHeader(path)
+    if (
+      !header ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(header.sessionId) ||
+      !sessionCwdsEquivalent(header.cwd, cwd)
+    )
+      throw new Error('Invalid Pi history or cwd mismatch')
+    const previous = this.store.get(header.sessionId)
+    if (previous && (await realpath(previous.sessionFile)) !== path)
+      throw new Error('Session identity is already mapped to another history')
+    this.store.upsert({ ...header, sessionFile: path })
+    return { sessionId: header.sessionId }
+  }
 
   upsert(entry: { sessionId: string; cwd: string; sessionFile: string }): void {
     this.store.upsert(entry)

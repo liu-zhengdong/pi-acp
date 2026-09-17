@@ -4,7 +4,7 @@
 
 It translates ACP JSON-RPC 2.0 messages over stdio into commands for `pi --mode rpc`. It then streams pi events back to the client.
 
-本仓库基于 [regadas/pi-acp](https://github.com/regadas/pi-acp)，保留其与原始 [svkozak/pi-acp](https://github.com/svkozak/pi-acp) 的 Git 历史及 MIT 署名。新增能力是通过配套的 pi-mcp-adapter，为 ACP 会话增量接入外部 MCP 服务。
+本仓库基于 [regadas/pi-acp](https://github.com/regadas/pi-acp)，保留其与原始 [svkozak/pi-acp](https://github.com/svkozak/pi-acp) 的 Git 历史及 MIT 署名。新增能力包括 ACP 会话的外部 MCP 接入，以及运行中的 Pi 原进程发现、连接与消息投递。
 
 本 fork 使用独立 npm 包名 `@liuser/pi-acp`，CLI 仍叫 `pi-acp`；不要将 `@regadas/pi-acp` 或无作用域同名包当作本实现。
 
@@ -13,7 +13,7 @@ npm install -g @liuser/pi-acp
 pi install npm:@liuser/pi-mcp-adapter
 ```
 
-第二条安装提供 MCP 能力的配套 Pi 扩展，ACP 本身是 CLI，不需要作为日常 Pi 插件重复加载。已有无作用域 MCP adapter 时，应先用 `pi remove npm:pi-mcp-adapter` 移除旧包的加载项，再安装 scoped 版本；MCP 配置和认证不需要迁移。
+第二条安装提供 MCP 能力的配套 Pi 扩展。仅使用后台 ACP 会话时，第一条 CLI 安装已经足够；需要日常 TUI 原进程接入时，再启用本包的通用 Pi 扩展，见下文。已有无作用域 MCP adapter 时，应先用 `pi remove npm:pi-mcp-adapter` 移除旧包的加载项，再安装 scoped 版本；MCP 配置和认证不需要迁移。
 
 ## 上游同步
 
@@ -134,7 +134,7 @@ Alternatively, point Zed directly to the built entry point without linking it:
 - 简短使用说明追加到下一轮上下文，具体参数从代理的发现／描述结果读取，不改写 system prompt。服务地址、headers 和 env 不加入这段说明。
 - 服务列表以当前 ACP 请求为准；恢复时重新提供连接描述，不新增 pi-acp 自有的 MCP 配置存储。上游已有 Session 映射和 MCP adapter 的元数据缓存行为保持原样。
 - 空列表保留原有启动方式，不强制安装 MCP adapter。已按普通模式运行的 Pi 不能原地变成固定代理模式；需要先关闭该会话的进程，再以非空列表恢复。代理模式只约束本 adapter 的 MCP 工具，不约束其他扩展。
-- 本功能接入会话建立／恢复的服务列表，不提供运行中添加新 MCP 端点的独立 ACP 方法。已接入服务的工具目录变化继续使用 MCP 的通知与刷新机制。
+- 会话建立／恢复使用上述标准服务列表；运行中的增量接入使用下文 `runtime/v1`。已接入服务的工具目录变化继续使用 MCP 的通知与刷新机制。
 
 本地确定性验收入口（真实 Pi 和 MCP adapter，模型输出为本地夹具，不调用外部模型）：
 
@@ -144,6 +144,43 @@ PI_ACP_MCP_EXTENSION=/absolute/path/to/pi-mcp-adapter/index.ts npm run smoke:mcp
 ```
 
 验收使用临时 Pi 配置，检查原服务保留、三种传输、动态工具、关闭后恢复、实际模型 `tools` 和 system prompt 的稳定性，以及坏输入拒绝。输出证据目录和源码哈希；脚本不改动用户原配置。
+
+### 原进程接入与运行控制
+
+本功能在 Pi 0.85.1 上实测。后台 RPC 沿用原入口；TUI 需要预先启用本包的通用扩展。从源码构建后，在该仓库执行：
+
+```bash
+pi install .
+PI_MCP_TOOL_EXPOSURE=proxy-only pi
+```
+
+Pi 与 ACP 端需使用同一个 `PI_ACP_DIR`。MCP 接入还要求已经启用配套 adapter；扩展安装不替用户切换已有进程的工具暴露模式。未加载通用扩展的进程不会被发现。安装最新已发布 CLI 不代表含有尚未发布的本分支能力。
+
+ACP `initialize` 的 `_meta["pi-acp/runtime/v1"]` 声明以下命名空间方法，不改变标准 `session/load` 等方法的含义：
+
+| 方法                  | 参数与作用                                                                          |
+| --------------------- | ----------------------------------------------------------------------------------- |
+| `_pi/runtime/list`    | `{}`：列出本机 TUI 和当前 ACP 进程托管的 RPC，不返回连接凭据                        |
+| `_pi/runtime/attach`  | `{runtimeId}` 或 `{sessionId}`：后者只选择本 ACP 托管的 RPC；返回完整状态           |
+| `_pi/runtime/status`  | `{runtimeId,generation}`：读取当前 sessionId、sessionFile、cwd、busy、model、pid    |
+| `_pi/runtime/deliver` | 目标字段加 `{sessionId,id,source,text,delivery,triggerTurn?}`：追加有来源的外部消息 |
+| `_pi/runtime/mcp`     | 目标字段加 `{sessionId,mcpServers}`：增量注册服务                                   |
+| `_pi/runtime/detach`  | `{runtimeId,generation}`：断开接入，不终止 TUI                                      |
+
+投递 `id` 使用 UUID，`delivery` 为 `steer` 或 `followUp`。`triggerTurn` 默认 true；false 仅抑制空闲时开启新回合，忙时仍按指定队列插入。返回 `accepted` 是入队确认，不是已读或处理完成。相同 ID 的相同内容在当前代际内去重，改写内容重用 ID 会被拒绝；去重表有界，不承诺跨崩溃的恰好一次执行。消息是 custom message，不展开外部正文中的 slash 命令，也不把另起的消息执行归到某个标准 ACP prompt 的返回值。
+
+MCP 忙时只允许增量新增，不替换或移除现有服务；冲突拒绝、失败回滚。新服务说明作为消息进入后续模型上下文，工具参数仍按需通过固定代理描述；不修改 tools 或基础 system（包括自定义 SYSTEM.md）。地址、headers、env 不放入说明。
+
+本机私有 IPC 与短期登记由 pi-acp 管理，无额外守护进程。一个实例同时只接受一个 ACP 控制连接，用户自己的终端仍可操作。断开时只释放本连接持有的服务，忙时等待安全清理；标准 `session/close` 仍负责关闭自己托管的后台进程。`/new`、`/reload` 后实例身份保留、代际更新，旧请求明确拒绝，客户端重新发现并接入。
+
+历史会话迁移使用 `_pi/session/import`，参数 `{cwd,sessionFile}` 均为绝对路径，返回 `{sessionId}` 后再调用标准恢复入口。只读校验 Pi 会话头的 ID／工作目录后记录映射，不复制历史，不绕过单写者约束。
+
+```bash
+npm run build
+PI_ACP_MCP_EXTENSION=/absolute/path/to/pi-mcp-adapter/index.ts npm run smoke:runtime
+```
+
+该入口使用真实 Pi TUI、本地确定性模型和真实 MCP，覆盖忙时接入与工具调用、消息来源、tools/system、回滚与旧代际拒绝；不代表模型自主决策质量。当前完整联调平台为 macOS，Windows 命名管道路径尚未实测。
 
 ### Environment variables
 
@@ -202,13 +239,16 @@ Project layout:
 
 - `src/acp/*` – ACP server + translation layer
 - `src/pi-rpc/*` – pi subprocess wrapper (RPC protocol)
+- `src/runtime/*` – 通用原进程入口、私有 IPC 与按 ACP 连接隔离的控制门面
+
+源码 Git 依赖使用 `prepare` 构建 dist；注册表安装使用打包后的 dist，不要求用户编译。
 
 ## Limitations
 
 - No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally. Bash tool calls are rendered through Zed's `_meta.terminal_output` convention only when the client negotiates it; otherwise output is plain tool content.
 - Terminal login is advertised only to clients that declare the (unstable) `clientCapabilities.auth.terminal` capability; Zed's `_meta["terminal-auth"]` launch banner additionally requires its matching client `_meta` flag.
 - ACP MCP 依赖支持固定代理回执的配套 Pi 扩展；能力声明不代表环境已经安装它。缺少／不兼容 adapter、名称冲突、超大或畸形描述均明确失败，不返回缺少所请求工具的降级会话。
-- ACP fork、steering/follow-up 方法、additional directories、subagent lineage、goals/AIR、交互终端 stdin 和 sandbox/approval modes 尚未声明，当前 Pi RPC 无法安全提供这些完整语义。 Adapter `/steering` and `/follow-up` commands only configure pi queue delivery modes.
+- 标准 ACP fork、steering/follow-up 方法、additional directories、subagent lineage、goals/AIR、交互终端 stdin 和 sandbox/approval modes 尚未声明；本包的外部消息投递走独立 `runtime/v1`，不宣称具备这些完整标准语义。 Adapter `/steering` and `/follow-up` commands only configure pi queue delivery modes.
 - On Windows, native executables launch directly. `.cmd`/`.bat` launchers necessarily pass through `cmd.exe`; pi-acp builds an escaped argument boundary and never enables Node's `shell` mode.
 - Additional workspace directories are not supported: the `sessionCapabilities.additionalDirectories` capability is not advertised, and `session/new`, `session/load`, and `session/resume` requests carrying a non-empty `additionalDirectories` list are rejected with `invalid params` instead of silently dropping the extra roots. The session's `cwd` remains the only workspace root.
 - Pi session files do not coordinate concurrent writers: each pi process keeps its own in-memory view while appending to the shared history. `pi-acp` inherits this constraint, so simultaneously operating on the same persisted session from multiple `pi-acp` or pi processes is unsupported. Atomic adapter mapping records prevent cross-process map updates from being lost, but they are not a session-ownership lease; keep one active writer per persisted session to prevent divergent or damaged history.
