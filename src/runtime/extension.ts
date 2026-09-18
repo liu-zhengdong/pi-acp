@@ -3,6 +3,7 @@ import { chmodSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer, type Server, type Socket } from 'node:net'
 import { agent, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { registerMcpBridge, type McpContext, type McpExtensionApi } from '../pi-rpc/mcp-extension.js'
+import { RuntimeEvents, resultText } from './events.js'
 import { processIdentity, rememberIdentitySession } from './identity.js'
 import {
   object,
@@ -42,6 +43,7 @@ export function registerRuntimeBridge(pi: McpExtensionApi, mcp: ReturnType<typeo
   const runtimeId = typeof globals[identityKey] === 'string' ? (globals[identityKey] as string) : randomUUID()
   globals[identityKey] = runtimeId
   let ctx: Context | undefined, record: RuntimeRecord | undefined, server: Server | undefined
+  let events = new RuntimeEvents()
   let epoch = 0,
     closing = true,
     owner: symbol | undefined
@@ -117,6 +119,8 @@ export function registerRuntimeBridge(pi: McpExtensionApi, mcp: ReturnType<typeo
   }
   pi.on('session_start', async (_, context) => {
     await stop()
+    events = new RuntimeEvents()
+    events.append({ kind: 'session' })
     ctx = context as Context
     closing = false
     const generation = epoch
@@ -174,6 +178,16 @@ export function registerRuntimeBridge(pi: McpExtensionApi, mcp: ReturnType<typeo
           return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, _meta: { [RUNTIME_CAPABILITY]: true } }
         })
         .onRequest(runtimeMethods.status, object, ({ params }) => ready(params).now)
+        .onRequest(runtimeMethods.events, object, ({ params }) => {
+          const { now } = ready(params)
+          if (params.sessionId !== now.sessionId) throw new Error('Session changed; reconfirm the target')
+          return {
+            ...events.page(params),
+            runtimeId: now.runtimeId,
+            generation: now.generation,
+            sessionId: now.sessionId
+          }
+        })
         .onRequest(runtimeMethods.deliver, object, ({ params }) => {
           const { now } = ready(params)
           if (params.sessionId !== now.sessionId) throw new Error('Session changed; reconfirm the target')
@@ -204,6 +218,7 @@ export function registerRuntimeBridge(pi: McpExtensionApi, mcp: ReturnType<typeo
               deliverAs: params.delivery as 'steer' | 'followUp'
             }
           )
+          events.append({ kind: 'delivery', name: source, text })
           received.set(id, fingerprint)
           if (received.size > 2000) received.delete(received.keys().next().value!)
           return { accepted: true, sessionId: now.sessionId }
@@ -238,6 +253,42 @@ export function registerRuntimeBridge(pi: McpExtensionApi, mcp: ReturnType<typeo
   })
   pi.on('before_agent_start', (_, context) => {
     if (!closing) ctx = context as Context
+  })
+  for (const [hook, kind] of [
+    ['agent_start', 'run_start'],
+    ['agent_settled', 'run_end']
+  ] as const)
+    pi.on(hook, () => {
+      if (!closing) events.append({ kind })
+    })
+  for (const [hook, kind] of [
+    ['tool_execution_start', 'tool_start'],
+    ['tool_execution_end', 'tool_end']
+  ] as const)
+    pi.on(hook, value => {
+      if (closing) return
+      const event = object(value)
+      if (typeof event.toolName !== 'string' || typeof event.toolCallId !== 'string') return
+      events.append({
+        kind,
+        name: event.toolName.slice(0, 256),
+        callId: event.toolCallId.slice(0, 256),
+        text: kind === 'tool_start' ? JSON.stringify(event.args ?? {}) : resultText(event.result),
+        ...(kind === 'tool_end' ? { error: event.isError === true } : {})
+      })
+    })
+  pi.on('message_end', value => {
+    if (closing) return
+    const message = object(object(value).message)
+    if (message.role !== 'user' && message.role !== 'assistant') return
+    const text = typeof message.content === 'string' ? message.content : resultText(message)
+    if (text || message.stopReason === 'error' || message.stopReason === 'aborted')
+      events.append({
+        kind: 'message',
+        name: message.role,
+        text: text || String(message.errorMessage ?? message.stopReason),
+        error: message.stopReason === 'error' || message.stopReason === 'aborted'
+      })
   })
   pi.on('session_shutdown', () => stop())
 }

@@ -1,3 +1,4 @@
+import { EVENTS_CAPABILITY } from '../runtime/events.js'
 import {
   agent as acpAgent,
   methods,
@@ -107,7 +108,15 @@ export function createPiAcpAgentApp(opts?: { onAgent?: (agent: PiAcpAgent | null
           throw RequestError.requestCancelled({}, 'ACP connection closed during initialize')
         }
         initializeState = 'initialized'
-        return { ...response, _meta: { ...response._meta, [RUNTIME_CAPABILITY]: true, [IDENTITY_CAPABILITY]: true } }
+        return {
+          ...response,
+          _meta: {
+            ...response._meta,
+            [RUNTIME_CAPABILITY]: true,
+            [EVENTS_CAPABILITY]: true,
+            [IDENTITY_CAPABILITY]: true
+          }
+        }
       } catch (error) {
         // Do not reset state belonging to a newer connection.
         if (active === agent) initializeState = 'uninitialized'
@@ -137,6 +146,10 @@ export function createPiAcpAgentApp(opts?: { onAgent?: (agent: PiAcpAgent | null
     .onRequest(runtimeMethods.status, object, ctx => {
       getInitializedAgent()
       return runtimes!.request(runtimeMethods.status, ctx.params)
+    })
+    .onRequest(runtimeMethods.events, object, ctx => {
+      getInitializedAgent()
+      return runtimes!.request(runtimeMethods.events, ctx.params)
     })
     .onRequest(runtimeMethods.deliver, object, ctx => {
       getInitializedAgent()

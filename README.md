@@ -167,6 +167,16 @@ ACP `initialize` 的 `_meta["pi-acp/runtime/v1"]` 声明以下命名空间方法
 | `_pi/runtime/mcp`     | 目标字段加 `{sessionId,mcpServers}`：增量注册服务                                   |
 | `_pi/runtime/detach`  | `{runtimeId,generation}`：断开接入，不终止 TUI                                      |
 
+### 运行事件
+
+ACP `initialize` 通过 `_meta["pi-acp/runtime-events/v1"]` 声明 `_pi/runtime/events`。已接入的控制连接以 `{runtimeId,generation,sessionId,after?,limit?}` 分页读取事件；`after` 默认 0，`limit` 默认 50、最大 100。返回 `{runtimeId,generation,sessionId,items,nextAfter,hasMore,gap}`。
+
+事件含序号、时间和类型：会话开始、回合开始／结束、工具开始／结束、完成的用户／助手文本及外部投递。工具开始保留参数，结束保留文本结果和错误标记；不采集逐 token 更新、思考内容、图片或工具 details。参数和结果可能包含工作区敏感正文，客户端应仅向获授权的审阅者展示。
+
+缓冲按运行代际隔离，最多 512 条且不超过 1 MiB；单条文本最多 8,192 个字符，单页约 64 KiB。返回 `truncated` 表示文本截断，`gap` 表示早期事件已被淘汰，客户端不得补造缺失轨迹。扩展仅保留近期内存事件，长期保存由客户端负责。旧代际、无效游标及未接入的控制连接均被拒绝。
+
+### 投递与连接语义
+
 投递 `id` 使用 UUID，`delivery` 为 `steer` 或 `followUp`。`triggerTurn` 默认 true；false 仅抑制空闲时开启新回合，忙时仍按指定队列插入。返回 `accepted` 是入队确认，不是已读或处理完成。相同 ID 的相同内容在当前代际内去重，改写内容重用 ID 会被拒绝；去重表有界，不承诺跨崩溃的恰好一次执行。消息是 custom message，不展开外部正文中的 slash 命令，也不把另起的消息执行归到某个标准 ACP prompt 的返回值。
 
 MCP 忙时只允许增量新增，不替换或移除现有服务；冲突拒绝、失败回滚。新服务说明作为消息进入后续模型上下文，工具参数仍按需通过固定代理描述；不修改 tools 或基础 system（包括自定义 SYSTEM.md）。地址、headers、env 不放入说明。

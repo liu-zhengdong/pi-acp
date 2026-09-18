@@ -12,6 +12,7 @@ export const runtimeMethods = {
   list: '_pi/runtime/list',
   attach: '_pi/runtime/attach',
   status: '_pi/runtime/status',
+  events: '_pi/runtime/events',
   deliver: '_pi/runtime/deliver',
   mcp: '_pi/runtime/mcp',
   detach: '_pi/runtime/detach'

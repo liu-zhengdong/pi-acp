@@ -76,8 +76,8 @@ test('live runtime: ACP facade, scoped MCP, generation fences, receipts and malf
   }
   const mcp = registerMcpBridge(pi)
   registerRuntimeBridge(pi, mcp)
-  const fire = async (name: string) => {
-    for (const hook of hooks.get(name) ?? []) await hook({}, context)
+  const fire = async (name: string, event: unknown = {}) => {
+    for (const hook of hooks.get(name) ?? []) await hook(event, context)
   }
   const peers: ClientConnection[] = []
   const connect = () => {
@@ -170,6 +170,56 @@ test('live runtime: ACP facade, scoped MCP, generation fences, receipts and malf
     ])
       await assert.rejects(call(a, methods.deliver, bad))
     assert.equal(messages.length, 2)
+    await fire('agent_start')
+    await fire('tool_execution_start', { toolName: 'read', toolCallId: 't1', args: { path: '/tmp/example.txt' } })
+    await fire('tool_execution_update', { partialResult: { content: [{ type: 'text', text: 'TOKEN_STREAM' }] } })
+    await fire('tool_execution_end', {
+      toolName: 'read',
+      toolCallId: 't1',
+      isError: false,
+      result: {
+        content: [
+          { type: 'text', text: 'actual result' },
+          { type: 'image', data: 'MEDIA_BYTES' }
+        ],
+        details: { token: 'SECRET_DETAILS' }
+      }
+    })
+    await fire('message_end', {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'PRIVATE_THOUGHT' },
+          { type: 'text', text: 'Done' }
+        ]
+      }
+    })
+    await fire('agent_settled')
+    const events = await call<{ items: Array<{ kind: string }>; nextAfter: number }>(a, methods.events, {
+      ...target,
+      after: 0,
+      limit: 100
+    })
+    assert.deepEqual(
+      events.items.map(e => e.kind),
+      ['session', 'delivery', 'run_start', 'tool_start', 'tool_end', 'message', 'run_end']
+    )
+    assert(!/TOKEN_STREAM|MEDIA_BYTES|SECRET_DETAILS|PRIVATE_THOUGHT/.test(JSON.stringify(events)))
+    assert.match(JSON.stringify(events), /actual result/)
+    assert.deepEqual(
+      (await call<{ items: unknown[] }>(a, methods.events, { ...target, after: events.nextAfter })).items,
+      []
+    )
+    for (const broken of [
+      { after: -1 },
+      { after: 999999 },
+      { limit: 0 },
+      { limit: 101 },
+      { sessionId: randomUUID() },
+      { generation: randomUUID() }
+    ])
+      await assert.rejects(call(a, methods.events, { ...target, ...broken }))
+    await assert.rejects(call(b, methods.events, target), 'unattached peer cannot read events')
     a.close()
     await delay(50)
     assert(active.has('live'), 'disconnect must not remove an in-use service')
@@ -196,6 +246,17 @@ test('live runtime: ACP facade, scoped MCP, generation fences, receipts and malf
     assert.notEqual(replacement.generation, target.generation)
     assert.notEqual(replacement.sessionId, target.sessionId)
     await assert.rejects(call(c, methods.deliver, delivery))
+    await assert.rejects(call(c, methods.events, target))
+    const fresh = await call<{ items: Array<{ kind: string }>; nextAfter: number }>(c, methods.events, {
+      runtimeId,
+      generation: replacement.generation,
+      sessionId
+    })
+    assert.deepEqual(
+      fresh.items.map(e => e.kind),
+      ['session']
+    )
+    assert.equal(fresh.nextAfter, 1)
     await call(c, methods.mcp, {
       runtimeId,
       generation: replacement.generation,
