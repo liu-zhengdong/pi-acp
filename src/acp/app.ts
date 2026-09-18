@@ -10,6 +10,7 @@ import { McpConfigurationError, parseMcpServers } from '../pi-rpc/mcp-servers.js
 import { PiAcpAgent, runPromptWithCancellation } from './agent.js'
 import { ClientConnection } from './client.js'
 import { RuntimeGateway } from '../runtime/gateway.js'
+import { IDENTITY_CAPABILITY } from '../runtime/identity.js'
 import { object, string, RUNTIME_CAPABILITY, runtimeMethods } from '../runtime/transport.js'
 import { SessionRepository } from './session-repository.js'
 
@@ -72,8 +73,8 @@ export function createPiAcpAgentApp(opts?: { onAgent?: (agent: PiAcpAgent | null
 
   return acpAgent({ name: 'pi-acp' })
     .onConnect(connection => {
-      const agent = new PiAcpAgent(new ClientConnection(connection.client))
       const gateway = new RuntimeGateway()
+      const agent = new PiAcpAgent(new ClientConnection(connection.client), gateway)
       runtimes = gateway
       active = agent
       initializeState = 'uninitialized'
@@ -106,7 +107,7 @@ export function createPiAcpAgentApp(opts?: { onAgent?: (agent: PiAcpAgent | null
           throw RequestError.requestCancelled({}, 'ACP connection closed during initialize')
         }
         initializeState = 'initialized'
-        return { ...response, _meta: { ...response._meta, [RUNTIME_CAPABILITY]: true } }
+        return { ...response, _meta: { ...response._meta, [RUNTIME_CAPABILITY]: true, [IDENTITY_CAPABILITY]: true } }
       } catch (error) {
         // Do not reset state belonging to a newer connection.
         if (active === agent) initializeState = 'uninitialized'
@@ -116,6 +117,14 @@ export function createPiAcpAgentApp(opts?: { onAgent?: (agent: PiAcpAgent | null
     .onRequest('_pi/session/import', object, ctx => {
       getInitializedAgent()
       return new SessionRepository().importFile(string(ctx.params.cwd), string(ctx.params.sessionFile))
+    })
+    .onRequest('_pi/identity/stop', object, ctx => {
+      getInitializedAgent()
+      return runtimes!.stop(ctx.params)
+    })
+    .onRequest('_pi/identity/start', object, ctx => {
+      getInitializedAgent()
+      return runtimes!.start(ctx.params)
     })
     .onRequest(runtimeMethods.list, object, () => {
       getInitializedAgent()

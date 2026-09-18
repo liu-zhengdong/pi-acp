@@ -182,6 +182,23 @@ PI_ACP_MCP_EXTENSION=/absolute/path/to/pi-mcp-adapter/index.ts npm run smoke:run
 
 该入口使用真实 Pi TUI、本地确定性模型和真实 MCP，覆盖忙时接入与工具调用、消息来源、tools/system、回滚与旧代际拒绝；不代表模型自主决策质量。当前完整联调平台为 macOS，Windows 命名管道路径尚未实测。
 
+### 具名身份与单实例
+
+客户端可将长期身份与 Pi 会话、进程分开。ACP `initialize` 的 `_meta["pi-acp/identity/v1"]` 声明以下能力：
+
+| 方法                 | 参数与作用                                                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `_pi/identity/start` | `{identityId,agentDirectory,cwd,sessionFile?}`：以独立配置创建／恢复后台 RPC，返回 `{runtimeId}`，再经 `runtime/v1` 接入 |
+| `_pi/identity/stop`  | `{identityId}`：停止当前 ACP 连接启动的该身份 RPC；不终止外部 TUI                                                        |
+
+`identityId` 为客户端持久分配的 UUID；`agentDirectory` 与 `cwd` 为已存在的绝对目录。配置目录需要预先启用本包通用扩展；有外部 MCP 时还需配套固定代理 adapter。启动时强制使用身份自己的配置与会话目录，最后会话位置保存在 pi-acp 状态目录中。实例状态额外返回 `identityId`；普通 Pi 为 `null`，不会因发现或连接自动获得长期身份。
+
+原生 TUI 入口由同一包的 `@liuser/pi-acp/dist/identity.js` 导出 `runNamedTui({identityId,agentDirectory,cwd,sessionFile?})`，由客户端解析业务身份后调用，不接受任意 Pi 参数。TUI 和 RPC 共用占用机制：从启动前到实际进程退出全程持有；断开 ACP、网络超时、忙碌或切换会话都不释放身份。重启默认恢复该身份的最后会话，历史会话初次迁移可提供 `sessionFile`。
+
+占用记录位于同一 `PI_ACP_DIR/identities/`；不同状态目录不属于同一个互斥范围。重复启动返回占用 PID 与工作目录，不抢占已有进程。只有已知父子进程均退出才回收旧记录；启动中断、损坏记录或残留 guard 采用保守拒绝，需要先确认相关进程状态再人工处理。这里是受信任单用户环境的生命周期约束，不是对有本机文件权限者的安全沙箱。
+
+本机真实 Pi 验证由 Atrium 的 `npm run test:pi` 覆盖：实际 CLI、TUI/RPC 交叉占用、原生 `/new`、退出重启及同一聊天延续；本仓库单元测试另覆盖坏输入、损坏／模糊占用和身份指针不向子进程继承。当前具名流程在 macOS 实测，Windows 具名 TUI 尚未验证。
+
 ### Environment variables
 
 - `PI_ACP_DIR=/path/to/state` overrides the adapter-owned state directory (default: `~/.pi/pi-acp`).

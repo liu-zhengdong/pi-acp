@@ -1,10 +1,11 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawnNamedPi, type NamedIdentity } from '../runtime/identity.js'
 import { randomUUID } from 'node:crypto'
 import { MCP_COMMAND, MCP_WIDGET, McpConfigurationError, type McpServer } from './mcp-servers.js'
 import { existsSync, mkdirSync, writeFileSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildPiInvocation, getPiCommand } from './command.js'
+import { getPiCommand } from './command.js'
 import { LfLineDecoder } from './line-decoder.js'
 import { assertSupportedPiVersion, PiVersionError } from './version.js'
 import {
@@ -98,6 +99,8 @@ type PiExtensionUiResponse =
 
 type SpawnParams = {
   cwd: string
+  agentDirectory?: string
+  identity?: NamedIdentity
   /** 为带外部 MCP 的子进程选择固定代理，不修改父进程或配置文件。 */
   mcpProxyOnly?: boolean
   sessionDirectory?: string
@@ -377,18 +380,22 @@ export class PiRpcProcess {
       }
     }
 
-    const invocation = buildPiInvocation(cmd, args, { cwd: params.cwd })
-    if (!invocation) {
+    const env = { ...process.env }
+    if (params.agentDirectory) env.PI_CODING_AGENT_DIR = params.agentDirectory
+    if (params.mcpProxyOnly) env.PI_MCP_TOOL_EXPOSURE = 'proxy-only'
+    let child: ChildProcessWithoutNullStreams
+    try {
+      child = spawnNamedPi(
+        cmd,
+        args,
+        params.cwd,
+        { stdio: 'pipe', env },
+        params.identity
+      ) as ChildProcessWithoutNullStreams
+    } catch (error) {
       cleanupEmptySession()
-      throw piExecutableNotFoundError(cmd)
+      throw error
     }
-    const child = spawn(invocation.executable, invocation.args, {
-      cwd: params.cwd,
-      stdio: 'pipe',
-      env: params.mcpProxyOnly ? { ...process.env, PI_MCP_TOOL_EXPOSURE: 'proxy-only' } : process.env,
-      shell: false,
-      windowsVerbatimArguments: invocation.windowsVerbatimArguments
-    })
     // Wire stdout/stderr and lifecycle listeners immediately. A child can exit
     // directly after its `spawn` event; constructing only after awaiting that
     // event creates a window where the terminal event is lost.

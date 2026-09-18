@@ -163,6 +163,7 @@ export class PiAcpAgent implements ACPAgent {
     this.disposed = true
     this.mcpServers.clear()
     this.sessions.disposeAll()
+    this.runtime?.close()
   }
 
   /**
@@ -173,10 +174,13 @@ export class PiAcpAgent implements ACPAgent {
   async disposeAndWait(timeoutMs: number): Promise<void> {
     this.disposed = true
     this.mcpServers.clear()
-    await this.sessions.disposeAllAndWait(timeoutMs)
+    await Promise.all([this.sessions.disposeAllAndWait(timeoutMs), this.runtime?.disposeAndWait(timeoutMs)])
   }
 
-  constructor(conn: AcpClient) {
+  constructor(
+    conn: AcpClient,
+    private readonly runtime?: { close(): void; disposeAndWait(timeoutMs: number): Promise<void> }
+  ) {
     this.conn = conn
   }
 

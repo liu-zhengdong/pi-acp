@@ -3,6 +3,7 @@ import { chmodSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer, type Server, type Socket } from 'node:net'
 import { agent, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { registerMcpBridge, type McpContext, type McpExtensionApi } from '../pi-rpc/mcp-extension.js'
+import { processIdentity, rememberIdentitySession } from './identity.js'
 import {
   object,
   recordPath,
@@ -36,6 +37,7 @@ const identityKey = Symbol.for('@liuser/pi-acp/runtime-identity/v1')
 export function registerRuntimeBridge(pi: McpExtensionApi, mcp: ReturnType<typeof registerMcpBridge>): void {
   const send = (pi as McpExtensionApi & { sendMessage?: SendMessage }).sendMessage?.bind(pi)
   if (!send) return // Older/test hosts without this public Pi API do not advertise live control.
+  const named = processIdentity()
   const globals = globalThis as Record<symbol, unknown>
   const runtimeId = typeof globals[identityKey] === 'string' ? (globals[identityKey] as string) : randomUUID()
   globals[identityKey] = runtimeId
@@ -130,6 +132,7 @@ export function registerRuntimeBridge(pi: McpExtensionApi, mcp: ReturnType<typeo
       sessionId: ctx.sessionManager.getSessionId(),
       pid: process.pid,
       ownerPid: mode === 'rpc' ? process.ppid : null,
+      identityId: named?.identityId ?? null,
       cwd: ctx.cwd,
       mode,
       endpoint,
@@ -231,6 +234,7 @@ export function registerRuntimeBridge(pi: McpExtensionApi, mcp: ReturnType<typeo
       temp = `${path}.${randomUUID()}.tmp`
     writeFileSync(temp, JSON.stringify(record), { mode: 0o600 })
     renameSync(temp, path)
+    if (named) rememberIdentitySession(named, ctx.sessionManager.getSessionFile() ?? null, runtimeId)
   })
   pi.on('before_agent_start', (_, context) => {
     if (!closing) ctx = context as Context

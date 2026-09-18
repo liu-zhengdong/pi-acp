@@ -22,6 +22,7 @@ export type RuntimeRecord = {
   sessionId: string
   pid: number
   ownerPid: number | null
+  identityId?: string | null
   cwd: string
   mode: 'tui' | 'rpc'
   endpoint: string
@@ -72,6 +73,7 @@ export function readRuntime(id: string): RuntimeRecord {
     throw new Error('Invalid runtime record')
   uuid(r.generation)
   uuid(r.sessionId)
+  if (r.identityId !== undefined && r.identityId !== null) uuid(r.identityId)
   string(r.cwd)
   string(r.endpoint)
   string(r.token, 128)
