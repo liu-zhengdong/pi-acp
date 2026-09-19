@@ -1,3 +1,4 @@
+import { EVENTS_CAPABILITY } from '../runtime/events.js'
 import {
   agent as acpAgent,
   methods,
@@ -9,6 +10,10 @@ import {
 import { McpConfigurationError, parseMcpServers } from '../pi-rpc/mcp-servers.js'
 import { PiAcpAgent, runPromptWithCancellation } from './agent.js'
 import { ClientConnection } from './client.js'
+import { RuntimeGateway } from '../runtime/gateway.js'
+import { IDENTITY_CAPABILITY } from '../runtime/identity.js'
+import { object, string, RUNTIME_CAPABILITY, runtimeMethods } from '../runtime/transport.js'
+import { SessionRepository } from './session-repository.js'
 
 // SDK 1.4 的默认解析器会丢弃无效 MCP 项；在原始请求边界校验，避免成功返回缺少能力的会话。
 function newSessionParams(value: unknown): NewSessionRequest {
@@ -49,6 +54,7 @@ function existingSessionParams(value: unknown): LoadSessionRequest {
  */
 export function createPiAcpAgentApp(opts?: { onAgent?: (agent: PiAcpAgent | null) => void }): AgentApp {
   let active: PiAcpAgent | null = null
+  let runtimes: RuntimeGateway | null = null
   // ACP wire state is connection-scoped. `initializing` closes the race where
   // two concurrent initialize requests both observed a false boolean.
   let initializeState: 'uninitialized' | 'initializing' | 'initialized' = 'uninitialized'
@@ -68,7 +74,9 @@ export function createPiAcpAgentApp(opts?: { onAgent?: (agent: PiAcpAgent | null
 
   return acpAgent({ name: 'pi-acp' })
     .onConnect(connection => {
-      const agent = new PiAcpAgent(new ClientConnection(connection.client))
+      const gateway = new RuntimeGateway()
+      const agent = new PiAcpAgent(new ClientConnection(connection.client), gateway)
+      runtimes = gateway
       active = agent
       initializeState = 'uninitialized'
       opts?.onAgent?.(agent)
@@ -81,6 +89,7 @@ export function createPiAcpAgentApp(opts?: { onAgent?: (agent: PiAcpAgent | null
             initializeState = 'uninitialized'
             opts?.onAgent?.(null)
           }
+          gateway.close()
           agent.dispose()
         },
         { once: true }
@@ -99,12 +108,60 @@ export function createPiAcpAgentApp(opts?: { onAgent?: (agent: PiAcpAgent | null
           throw RequestError.requestCancelled({}, 'ACP connection closed during initialize')
         }
         initializeState = 'initialized'
-        return response
+        return {
+          ...response,
+          _meta: {
+            ...response._meta,
+            [RUNTIME_CAPABILITY]: true,
+            [EVENTS_CAPABILITY]: true,
+            [IDENTITY_CAPABILITY]: true
+          }
+        }
       } catch (error) {
         // Do not reset state belonging to a newer connection.
         if (active === agent) initializeState = 'uninitialized'
         throw error
       }
+    })
+    .onRequest('_pi/session/import', object, ctx => {
+      getInitializedAgent()
+      return new SessionRepository().importFile(string(ctx.params.cwd), string(ctx.params.sessionFile))
+    })
+    .onRequest('_pi/identity/stop', object, ctx => {
+      getInitializedAgent()
+      return runtimes!.stop(ctx.params)
+    })
+    .onRequest('_pi/identity/start', object, ctx => {
+      getInitializedAgent()
+      return runtimes!.start(ctx.params)
+    })
+    .onRequest(runtimeMethods.list, object, () => {
+      getInitializedAgent()
+      return runtimes!.list()
+    })
+    .onRequest(runtimeMethods.attach, object, ctx => {
+      getInitializedAgent()
+      return runtimes!.attach(ctx.params)
+    })
+    .onRequest(runtimeMethods.status, object, ctx => {
+      getInitializedAgent()
+      return runtimes!.request(runtimeMethods.status, ctx.params)
+    })
+    .onRequest(runtimeMethods.events, object, ctx => {
+      getInitializedAgent()
+      return runtimes!.request(runtimeMethods.events, ctx.params)
+    })
+    .onRequest(runtimeMethods.deliver, object, ctx => {
+      getInitializedAgent()
+      return runtimes!.request(runtimeMethods.deliver, ctx.params)
+    })
+    .onRequest(runtimeMethods.mcp, object, ctx => {
+      getInitializedAgent()
+      return runtimes!.request(runtimeMethods.mcp, ctx.params)
+    })
+    .onRequest(runtimeMethods.detach, object, ctx => {
+      getInitializedAgent()
+      return runtimes!.request(runtimeMethods.detach, ctx.params)
     })
     .onRequest(methods.agent.authenticate, ctx => getInitializedAgent().authenticate(ctx.params))
     .onRequest(methods.agent.session.new, newSessionParams, ctx => getInitializedAgent().newSession(ctx.params))
