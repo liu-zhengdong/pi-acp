@@ -10,7 +10,7 @@ import {
 
 import { join } from 'node:path'
 import { PiRpcProcess } from '../pi-rpc/process.js'
-import { identitySession, parseIdentity } from './identity.js'
+import { parseIdentity, resolveIdentitySessionFile } from './identity.js'
 
 /** Connection-scoped ACP facade. It never takes ownership of an attached Pi process. */
 export class RuntimeGateway {
@@ -43,7 +43,10 @@ export class RuntimeGateway {
       identity = parseIdentity(params),
       cwd = string(params.cwd)
     if (this.closed) throw new Error('ACP connection closing')
-    const sessionPath = identitySession(identity) ?? (params.sessionFile ? string(params.sessionFile) : undefined)
+    const sessionPath = resolveIdentitySessionFile(
+      identity,
+      params.sessionFile ? string(params.sessionFile) : undefined
+    )
     const proc = await PiRpcProcess.spawn({
       cwd,
       identity,

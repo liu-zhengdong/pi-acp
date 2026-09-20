@@ -413,9 +413,12 @@ function resultText(value) {
 import { spawn } from "child_process";
 import { randomUUID as randomUUID2 } from "crypto";
 import {
+  closeSync,
   existsSync,
   mkdirSync as mkdirSync2,
+  openSync,
   readFileSync as readFileSync2,
+  readSync,
   realpathSync,
   renameSync,
   rmdirSync,
@@ -470,6 +473,7 @@ function processIdentity() {
 function rememberIdentitySession(identity, sessionFile, runtimeId) {
   writeAtomic(files(identity).cursor, { ...identity, sessionFile, runtimeId });
 }
+var SESSION_HEADER_SCAN = 1024 * 1024;
 
 // src/runtime/extension.ts
 var IMAGE_TYPES = /* @__PURE__ */ new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);

@@ -4,9 +4,12 @@
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   rmdirSync,
@@ -182,13 +185,64 @@ function processIdentity() {
 function rememberIdentitySession(identity, sessionFile, runtimeId) {
   writeAtomic(files(identity).cursor, { ...identity, sessionFile, runtimeId });
 }
-function identitySession(identity) {
+var SESSION_HEADER_SCAN = 1024 * 1024;
+function firstJsonlRecordIsSessionHeader(text) {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const value = JSON.parse(trimmed);
+      return value.type === "session" && typeof value.id === "string";
+    } catch {
+    }
+  }
+  return false;
+}
+function usablePiSessionFile(path) {
+  let size;
+  try {
+    const st = statSync2(path);
+    if (!st.isFile()) return false;
+    size = st.size;
+  } catch {
+    return false;
+  }
+  if (size === 0) return true;
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.allocUnsafe(Math.min(SESSION_HEADER_SCAN, size));
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return firstJsonlRecordIsSessionHeader(buf.subarray(0, n).toString("utf8"));
+  } catch {
+    return false;
+  } finally {
+    if (fd !== void 0) closeSync(fd);
+  }
+}
+function takeUsableSessionFile(path) {
+  if (!path || !existsSync(path)) return void 0;
+  if (usablePiSessionFile(path)) return path;
+  console.error(`pi-acp: ignoring invalid Pi session file, starting a new session: ${path}`);
+  return void 0;
+}
+function recordedIdentitySessionPath(identity) {
   const path = files(identity).cursor;
   if (!existsSync(path)) return void 0;
   const cursor = JSON.parse(readFileSync(path, "utf8"));
   if (cursor.identityId !== identity.identityId || cursor.agentDirectory !== identity.agentDirectory)
     throw new Error("Identity session directory mismatch");
   return cursor.sessionFile && existsSync(cursor.sessionFile) ? cursor.sessionFile : void 0;
+}
+function identitySession(identity) {
+  return takeUsableSessionFile(recordedIdentitySessionPath(identity));
+}
+function resolveIdentitySessionFile(identity, fallback) {
+  const recorded = recordedIdentitySessionPath(identity);
+  const usable = takeUsableSessionFile(recorded);
+  if (usable) return usable;
+  if (!fallback || fallback === recorded) return void 0;
+  return takeUsableSessionFile(fallback);
 }
 function spawnNamedPi(command, args, cwd, options, identity) {
   const invocation = buildPiInvocation(command, args, { cwd });
@@ -240,7 +294,7 @@ function spawnNamedPi(command, args, cwd, options, identity) {
 }
 async function runNamedTui(value) {
   const identity = parseIdentity(value);
-  const sessionFile = identitySession(identity) ?? value.sessionFile;
+  const sessionFile = resolveIdentitySessionFile(identity, value.sessionFile);
   const args = ["--session-dir", join2(identity.agentDirectory, "sessions")];
   if (sessionFile) args.push("--session", sessionFile);
   const child = spawnNamedPi(
@@ -271,7 +325,9 @@ export {
   parseIdentity,
   processIdentity,
   rememberIdentitySession,
+  resolveIdentitySessionFile,
   runNamedTui,
-  spawnNamedPi
+  spawnNamedPi,
+  usablePiSessionFile
 };
 //# sourceMappingURL=identity.js.map
