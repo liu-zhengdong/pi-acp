@@ -43,7 +43,7 @@
   },
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsup",
+    "compile": "tsup",
     "start": "node dist/index.js",
     "format": "prettier . --write",
     "format:check": "prettier . --check",
@@ -53,8 +53,8 @@
     "smoke": "node scripts/smoke-acp.mjs",
     "smoke:mcp": "node scripts/smoke-mcp.mjs",
     "smoke:runtime": "node scripts/smoke-runtime.mjs",
-    "eval:acp": "npm run build && node scripts/eval-zed-acp.mjs",
-    "validate": "npm run format:check && npm run typecheck && npm run lint && npm test && npm run build",
+    "eval:acp": "npm run compile && node scripts/eval-zed-acp.mjs",
+    "validate": "npm run format:check && npm run typecheck && npm run lint && npm test && npm run compile",
     "prepack": "npm run validate",
     "prepublishOnly": "npm run validate"
   },

@@ -86,7 +86,7 @@ npm install -g @earendil-works/pi-coding-agent
 git clone https://github.com/liu-zhengdong/pi-acp.git
 cd pi-acp
 npm ci
-npm run build
+npm run compile
 ```
 
 To expose the existing `pi-acp` executable on your `PATH`, link the package:
@@ -141,7 +141,7 @@ Alternatively, point Zed directly to the built entry point without linking it:
 本地确定性验收入口（真实 Pi 和 MCP adapter，模型输出为本地夹具，不调用外部模型）：
 
 ```bash
-npm run build
+npm run compile
 PI_ACP_MCP_EXTENSION=/absolute/path/to/pi-mcp-adapter/index.ts npm run smoke:mcp
 ```
 
@@ -188,7 +188,7 @@ MCP 忙时只允许增量新增，不替换或移除现有服务；冲突拒绝�
 历史会话迁移使用 `_pi/session/import`，参数 `{cwd,sessionFile}` 均为绝对路径，返回 `{sessionId}` 后再调用标准恢复入口。只读校验 Pi 会话头的 ID／工作目录后记录映射，不复制历史，不绕过单写者约束。
 
 ```bash
-npm run build
+npm run compile
 PI_ACP_MCP_EXTENSION=/absolute/path/to/pi-mcp-adapter/index.ts npm run smoke:runtime
 ```
 
@@ -258,7 +258,7 @@ Your ACP client can also invoke this automatically based on the agent's advertis
 ```bash
 npm install
 npm run dev        # run from src via tsx
-npm run build
+npm run compile
 npm run typecheck
 npm run lint
 npm run test
@@ -292,7 +292,7 @@ MIT (see [LICENSE](LICENSE)). This project originated from [svkozak/pi-acp](http
 ### Auxiliary manual probes
 
 `npm run smoke` remains an isolated, non-provider initialize/new/builtin/cancel/shutdown check.
-After `npm run build`, the other `scripts/smoke-*.mjs` entrypoints are manual probes, not CI coverage.
+After `npm run compile`, the other `scripts/smoke-*.mjs` entrypoints are manual probes, not CI coverage.
 Use disposable `PI_CODING_AGENT_DIR`, `PI_ACP_DIR`, and `PI_CODING_AGENT_SESSION_DIR` directories.
 `smoke-compact.mjs`, `smoke-export.mjs`, and `smoke-acp-load.mjs` can generate provider traffic and require
 `PI_ACP_MANUAL_PROVIDER=1` plus configured credentials. All probes assert responses and have finite deadlines.

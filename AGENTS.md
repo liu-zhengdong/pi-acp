@@ -34,7 +34,9 @@ npm run validate
 npm run smoke
 ```
 
-`validate` 包含格式、类型、lint、测试和构建。修改范围较小时先定向格式化，不让格式化过程改动原始验收证据。
+`validate` 包含格式、类型、lint、测试和构建。
+
+仓库须保持可直接以 git 依赖安装（`npm install github:liu-zhengdong/pi-acp`），这是自有插件的分发通道，不依赖 npm 发布：因此 `dist/` 构建产物提交入库（`git diff --exit-code dist/` 门禁防呆），且脚本名避开 pacote 会触发嵌套安装的 `build/prepare/prepack/install/postinstall/preinstall`——构建脚本叫 `compile`。嵌套安装会继承父 npm 导出的 `npm_config_allow_scripts`，在启用 allow-scripts 策略的环境下必然 EALLOWSCRIPTS。修改范围较小时先定向格式化，不让格式化过程改动原始验收证据。
 
 原进程联调使用 `npm run smoke:runtime`。消息与使用说明须检查实际模型载荷和到达时序，不能以 TUI 已显示代替当前回合已可见；Pi 的 `triggerTurn:false` 忙时行为须以原生入口验证。
 
