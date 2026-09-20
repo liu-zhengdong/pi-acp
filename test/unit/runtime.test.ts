@@ -24,7 +24,7 @@ test('live runtime: ACP facade, scoped MCP, generation fences, receipts and malf
   type Hook = Parameters<McpExtensionApi['on']>[1]
   const hooks = new Map<string, Hook[]>()
   const active = new Map<string, unknown>([['preconfigured', {}]])
-  const messages: Array<{ message: { content: string }; options?: unknown }> = []
+  const messages: Array<{ message: { content: unknown }; options?: unknown }> = []
   let busy = false,
     dead = false,
     sessionId = randomUUID()
@@ -268,6 +268,35 @@ test('live runtime: ACP facade, scoped MCP, generation fences, receipts and malf
       messages.at(-1)!.options,
       { deliverAs: 'steer', triggerTurn: false },
       'idle registration does not wake the model'
+    )
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+    const pictured = {
+      runtimeId,
+      generation: replacement.generation,
+      sessionId,
+      id: randomUUID(),
+      source: 'Atrium',
+      text: 'photo',
+      delivery: 'steer',
+      images: [{ type: 'image', mimeType: 'image/png', data: png }]
+    }
+    assert.equal((await call(c, methods.deliver, pictured)).accepted, true)
+    const sent = messages.at(-1)!.message.content
+    assert(Array.isArray(sent))
+    assert.equal((sent as { type: string }[])[1]?.type, 'image')
+    await assert.rejects(
+      call(c, methods.deliver, {
+        ...pictured,
+        id: randomUUID(),
+        images: [{ type: 'image', mimeType: 'image/png', data: '@@@' }]
+      })
+    )
+    await assert.rejects(
+      call(c, methods.deliver, {
+        ...pictured,
+        id: randomUUID(),
+        images: Array.from({ length: 11 }, () => pictured.images[0])
+      })
     )
   } finally {
     for (const peer of peers) peer.close()

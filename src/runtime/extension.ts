@@ -28,10 +28,34 @@ type Context = McpContext & {
     getBranch?(): Array<{ type: string; customType?: string }>
   }
 }
+type ImagePart = { type: 'image'; mimeType: string; data: string }
 type SendMessage = (
-  message: { customType: string; content: string; display: boolean; details?: Record<string, unknown> },
+  message: {
+    customType: string
+    content: string | Array<{ type: 'text'; text: string } | ImagePart>
+    display: boolean
+    details?: Record<string, unknown>
+  },
   options?: { triggerTurn?: boolean; deliverAs?: 'steer' | 'followUp' }
 ) => void
+const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+const MAX_IMAGES = 10
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+function parseImages(value: unknown): ImagePart[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > MAX_IMAGES) throw new Error('Invalid images')
+  return value.map(item => {
+    const image = object(item)
+    if (image.type !== 'image') throw new Error('Invalid image')
+    const mimeType = string(image.mimeType, 64)
+    if (!IMAGE_TYPES.has(mimeType)) throw new Error('Unsupported image type')
+    const data = string(image.data, 14_000_000)
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(data)) throw new Error('Invalid image data')
+    const bytes = Buffer.from(data, 'base64')
+    if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) throw new Error('Image too large')
+    return { type: 'image' as const, mimeType, data }
+  })
+}
 const identityKey = Symbol.for('@liuser/pi-acp/runtime-identity/v1')
 
 /** One process-local entry, shared by the standalone package and managed RPC extension. */
@@ -193,21 +217,32 @@ export function registerRuntimeBridge(pi: McpExtensionApi, mcp: ReturnType<typeo
           if (params.sessionId !== now.sessionId) throw new Error('Session changed; reconfirm the target')
           const id = uuid(params.id),
             text = string(params.text, 30000),
-            source = string(params.source, 160)
+            source = string(params.source, 160),
+            images = parseImages(params.images)
           if (/[\p{Cc}\p{Cf}]/u.test(source)) throw new Error('Invalid message source')
           if (!['steer', 'followUp'].includes(String(params.delivery))) throw new Error('Invalid delivery mode')
           if (params.triggerTurn !== undefined && typeof params.triggerTurn !== 'boolean')
             throw new Error('Invalid triggerTurn')
           const fingerprint = createHash('sha256')
-            .update(JSON.stringify([now.sessionId, text, source, params.delivery, params.triggerTurn ?? true]))
+            .update(
+              JSON.stringify([
+                now.sessionId,
+                text,
+                source,
+                params.delivery,
+                params.triggerTurn ?? true,
+                images.map(image => [image.mimeType, createHash('sha256').update(image.data).digest('hex')])
+              ])
+            )
             .digest('hex')
           const previous = received.get(id)
           if (previous && previous !== fingerprint) throw new Error('Delivery id reused with different content')
           if (previous) return { accepted: true, duplicate: true, sessionId: now.sessionId }
+          const header = `来自 ${source}\n\n${text}`
           send(
             {
               customType: 'pi-acp-external',
-              content: `来自 ${source}\n\n${text}`,
+              content: images.length === 0 ? header : [{ type: 'text' as const, text: header }, ...images],
               display: true,
               details: { deliveryId: id, source }
             },

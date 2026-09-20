@@ -158,14 +158,14 @@ Pi 与 ACP 端需使用同一个 `PI_ACP_DIR`。MCP 接入还要求已经启用�
 
 ACP `initialize` 的 `_meta["pi-acp/runtime/v1"]` 声明以下命名空间方法，不改变标准 `session/load` 等方法的含义：
 
-| 方法                  | 参数与作用                                                                          |
-| --------------------- | ----------------------------------------------------------------------------------- |
-| `_pi/runtime/list`    | `{}`：列出本机 TUI 和当前 ACP 进程托管的 RPC，不返回连接凭据                        |
-| `_pi/runtime/attach`  | `{runtimeId}` 或 `{sessionId}`：后者只选择本 ACP 托管的 RPC；返回完整状态           |
-| `_pi/runtime/status`  | `{runtimeId,generation}`：读取当前 sessionId、sessionFile、cwd、busy、model、pid    |
-| `_pi/runtime/deliver` | 目标字段加 `{sessionId,id,source,text,delivery,triggerTurn?}`：追加有来源的外部消息 |
-| `_pi/runtime/mcp`     | 目标字段加 `{sessionId,mcpServers}`：增量注册服务                                   |
-| `_pi/runtime/detach`  | `{runtimeId,generation}`：断开接入，不终止 TUI                                      |
+| 方法                  | 参数与作用                                                                                                                                   |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `_pi/runtime/list`    | `{}`：列出本机 TUI 和当前 ACP 进程托管的 RPC，不返回连接凭据                                                                                 |
+| `_pi/runtime/attach`  | `{runtimeId}` 或 `{sessionId}`：后者只选择本 ACP 托管的 RPC；返回完整状态                                                                    |
+| `_pi/runtime/status`  | `{runtimeId,generation}`：读取当前 sessionId、sessionFile、cwd、busy、model、pid                                                             |
+| `_pi/runtime/deliver` | 目标字段加 `{sessionId,id,source,text,delivery,triggerTurn?,images?}`：追加有来源的外部消息；`images` 最多 10 张 jpeg/png/gif/webp（base64） |
+| `_pi/runtime/mcp`     | 目标字段加 `{sessionId,mcpServers}`：增量注册服务                                                                                            |
+| `_pi/runtime/detach`  | `{runtimeId,generation}`：断开接入，不终止 TUI                                                                                               |
 
 ### 运行事件
 
@@ -177,7 +177,7 @@ ACP `initialize` 通过 `_meta["pi-acp/runtime-events/v1"]` 声明 `_pi/runtime/
 
 ### 投递与连接语义
 
-投递 `id` 使用 UUID，`delivery` 为 `steer` 或 `followUp`。`triggerTurn` 默认 true；false 仅抑制空闲时开启新回合，忙时仍按指定队列插入。返回 `accepted` 是入队确认，不是已读或处理完成。相同 ID 的相同内容在当前代际内去重，改写内容重用 ID 会被拒绝；去重表有界，不承诺跨崩溃的恰好一次执行。消息是 custom message，不展开外部正文中的 slash 命令，也不把另起的消息执行归到某个标准 ACP prompt 的返回值。
+投递 `id` 使用 UUID，`delivery` 为 `steer` 或 `followUp`。`triggerTurn` 默认 true；false 仅抑制空闲时开启新回合，忙时仍按指定队列插入。可选 `images` 进入同一条 custom message，并计入去重指纹；像素不写入运行事件。返回 `accepted` 是入队确认，不是已读或处理完成。相同 ID 的相同内容在当前代际内去重，改写内容重用 ID 会被拒绝；去重表有界，不承诺跨崩溃的恰好一次执行。消息是 custom message，不展开外部正文中的 slash 命令，也不把另起的消息执行归到某个标准 ACP prompt 的返回值。
 
 MCP 忙时只允许增量新增，不替换或移除现有服务；冲突拒绝、失败回滚。新服务说明作为消息进入后续模型上下文，工具参数仍按需通过固定代理描述；不修改 tools 或基础 system（包括自定义 SYSTEM.md）。地址、headers、env 不放入说明。
 
