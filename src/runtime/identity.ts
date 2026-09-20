@@ -1,9 +1,12 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   rmdirSync,
@@ -125,13 +128,74 @@ export function processIdentity(): NamedIdentity | null {
 export function rememberIdentitySession(identity: NamedIdentity, sessionFile: string | null, runtimeId: string) {
   writeAtomic(files(identity).cursor, { ...identity, sessionFile, runtimeId } satisfies Cursor)
 }
-export function identitySession(identity: NamedIdentity): string | undefined {
+
+const SESSION_HEADER_SCAN = 1024 * 1024
+
+function firstJsonlRecordIsSessionHeader(text: string): boolean {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      const value = JSON.parse(trimmed) as { type?: unknown; id?: unknown }
+      return value.type === 'session' && typeof value.id === 'string'
+    } catch {
+      // Pi skips unparseable JSONL lines and then requires the first object to be the session header.
+    }
+  }
+  return false
+}
+
+/** True when Pi would load this path instead of throwing "Session file is not a valid pi session". */
+export function usablePiSessionFile(path: string): boolean {
+  let size: number
+  try {
+    const st = statSync(path)
+    if (!st.isFile()) return false
+    size = st.size
+  } catch {
+    return false
+  }
+  if (size === 0) return true
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    const buf = Buffer.allocUnsafe(Math.min(SESSION_HEADER_SCAN, size))
+    const n = readSync(fd, buf, 0, buf.length, 0)
+    return firstJsonlRecordIsSessionHeader(buf.subarray(0, n).toString('utf8'))
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+function takeUsableSessionFile(path: string | undefined): string | undefined {
+  if (!path || !existsSync(path)) return undefined
+  if (usablePiSessionFile(path)) return path
+  console.error(`pi-acp: ignoring invalid Pi session file, starting a new session: ${path}`)
+  return undefined
+}
+
+function recordedIdentitySessionPath(identity: NamedIdentity): string | undefined {
   const path = files(identity).cursor
   if (!existsSync(path)) return undefined
   const cursor = JSON.parse(readFileSync(path, 'utf8')) as Cursor
   if (cursor.identityId !== identity.identityId || cursor.agentDirectory !== identity.agentDirectory)
     throw new Error('Identity session directory mismatch')
   return cursor.sessionFile && existsSync(cursor.sessionFile) ? cursor.sessionFile : undefined
+}
+
+export function identitySession(identity: NamedIdentity): string | undefined {
+  return takeUsableSessionFile(recordedIdentitySessionPath(identity))
+}
+
+/** Cursor first, then the client fallback. Invalid files are skipped so a new session can start. */
+export function resolveIdentitySessionFile(identity: NamedIdentity, fallback?: string): string | undefined {
+  const recorded = recordedIdentitySessionPath(identity)
+  const usable = takeUsableSessionFile(recorded)
+  if (usable) return usable
+  if (!fallback || fallback === recorded) return undefined
+  return takeUsableSessionFile(fallback)
 }
 /** Shared by TUI and RPC. The lock belongs to the complete child lifetime, not ACP attachment. */
 export function spawnNamedPi(
@@ -191,7 +255,7 @@ export function spawnNamedPi(
 
 export async function runNamedTui(value: NamedIdentity & { cwd: string; sessionFile?: string }): Promise<number> {
   const identity = parseIdentity(value)
-  const sessionFile = identitySession(identity) ?? value.sessionFile
+  const sessionFile = resolveIdentitySessionFile(identity, value.sessionFile)
   const args = ['--session-dir', join(identity.agentDirectory, 'sessions')]
   if (sessionFile) args.push('--session', sessionFile)
   const child = spawnNamedPi(

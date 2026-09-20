@@ -205,7 +205,7 @@ PI_ACP_MCP_EXTENSION=/absolute/path/to/pi-mcp-adapter/index.ts npm run smoke:run
 
 `identityId` 为客户端持久分配的 UUID；`agentDirectory` 与 `cwd` 为已存在的绝对目录。配置目录需要预先启用本包通用扩展；有外部 MCP 时还需配套固定代理 adapter。启动时强制使用身份自己的配置与会话目录，最后会话位置保存在 pi-acp 状态目录中。实例状态额外返回 `identityId`；普通 Pi 为 `null`，不会因发现或连接自动获得长期身份。
 
-原生 TUI 入口由同一包的 `@liuser/pi-acp/dist/identity.js` 导出 `runNamedTui({identityId,agentDirectory,cwd,sessionFile?})`，由客户端解析业务身份后调用，不接受任意 Pi 参数。TUI 和 RPC 共用占用机制：从启动前到实际进程退出全程持有；断开 ACP、网络超时、忙碌或切换会话都不释放身份。重启默认恢复该身份的最后会话，历史会话初次迁移可提供 `sessionFile`。
+原生 TUI 入口由同一包的 `@liuser/pi-acp/dist/identity.js` 导出 `runNamedTui({identityId,agentDirectory,cwd,sessionFile?})`，由客户端解析业务身份后调用，不接受任意 Pi 参数。TUI 和 RPC 共用占用机制：从启动前到实际进程退出全程持有；断开 ACP、网络超时、忙碌或切换会话都不释放身份。重启默认恢复该身份的最后会话；若该文件非空但缺少 Pi 会话头、Pi 无法加载，则忽略该文件并开新会话，不删除原文件。历史会话初次迁移可提供 `sessionFile`。
 
 占用记录位于同一 `PI_ACP_DIR/identities/`；不同状态目录不属于同一个互斥范围。重复启动返回占用 PID 与工作目录，不抢占已有进程。只有已知父子进程均退出才回收旧记录；启动中断、损坏记录或残留 guard 采用保守拒绝，需要先确认相关进程状态再人工处理。这里是受信任单用户环境的生命周期约束，不是对有本机文件权限者的安全沙箱。
 

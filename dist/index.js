@@ -1250,9 +1250,12 @@ import { dirname as dirname3 } from "path";
 import { spawn } from "child_process";
 import { randomUUID as randomUUID2 } from "crypto";
 import {
+  closeSync,
   existsSync,
   mkdirSync as mkdirSync2,
+  openSync,
   readFileSync as readFileSync2,
+  readSync,
   realpathSync,
   renameSync,
   rmdirSync,
@@ -1403,13 +1406,61 @@ function claimIdentity(value, cwd) {
     }
   };
 }
-function identitySession(identity) {
+var SESSION_HEADER_SCAN = 1024 * 1024;
+function firstJsonlRecordIsSessionHeader(text) {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const value = JSON.parse(trimmed);
+      return value.type === "session" && typeof value.id === "string";
+    } catch {
+    }
+  }
+  return false;
+}
+function usablePiSessionFile(path) {
+  let size;
+  try {
+    const st = statSync3(path);
+    if (!st.isFile()) return false;
+    size = st.size;
+  } catch {
+    return false;
+  }
+  if (size === 0) return true;
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.allocUnsafe(Math.min(SESSION_HEADER_SCAN, size));
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return firstJsonlRecordIsSessionHeader(buf.subarray(0, n).toString("utf8"));
+  } catch {
+    return false;
+  } finally {
+    if (fd !== void 0) closeSync(fd);
+  }
+}
+function takeUsableSessionFile(path) {
+  if (!path || !existsSync(path)) return void 0;
+  if (usablePiSessionFile(path)) return path;
+  console.error(`pi-acp: ignoring invalid Pi session file, starting a new session: ${path}`);
+  return void 0;
+}
+function recordedIdentitySessionPath(identity) {
   const path = files(identity).cursor;
   if (!existsSync(path)) return void 0;
   const cursor = JSON.parse(readFileSync2(path, "utf8"));
   if (cursor.identityId !== identity.identityId || cursor.agentDirectory !== identity.agentDirectory)
     throw new Error("Identity session directory mismatch");
   return cursor.sessionFile && existsSync(cursor.sessionFile) ? cursor.sessionFile : void 0;
+}
+function resolveIdentitySessionFile(identity, fallback) {
+  const recorded = recordedIdentitySessionPath(identity);
+  const usable = takeUsableSessionFile(recorded);
+  if (usable) return usable;
+  if (!fallback || fallback === recorded) return void 0;
+  return takeUsableSessionFile(fallback);
 }
 function spawnNamedPi(command, args, cwd, options, identity) {
   const invocation = buildPiInvocation(command, args, { cwd });
@@ -2500,7 +2551,7 @@ function maybeAuthRequiredError(err, authMethods = []) {
 }
 
 // src/acp/session-store.ts
-import { closeSync, fsyncSync, mkdirSync as mkdirSync4, openSync, readFileSync as readFileSync3, renameSync as renameSync2, unlinkSync as unlinkSync3, writeSync } from "fs";
+import { closeSync as closeSync2, fsyncSync, mkdirSync as mkdirSync4, openSync as openSync2, readFileSync as readFileSync3, renameSync as renameSync2, unlinkSync as unlinkSync3, writeSync } from "fs";
 import { createHash } from "crypto";
 import { readFile, readdir } from "fs/promises";
 import { dirname, join as join6 } from "path";
@@ -2589,12 +2640,12 @@ function writeBufferFully(fd, buffer, writer = writeSync) {
 function fsyncDirectoryBestEffort(path) {
   let fd = null;
   try {
-    fd = openSync(path, "r");
+    fd = openSync2(path, "r");
     fsyncSync(fd);
   } catch {
   } finally {
     try {
-      if (fd !== null) closeSync(fd);
+      if (fd !== null) closeSync2(fd);
     } catch {
     }
   }
@@ -2605,19 +2656,19 @@ function writeFileAtomic(path, data) {
   const tempPath = `${path}.${process.pid}.${++tempCounter}.tmp`;
   let fd = null;
   try {
-    fd = openSync(tempPath, "w", 384);
+    fd = openSync2(tempPath, "w", 384);
     writeBufferFully(fd, Buffer.from(data, "utf8"));
     try {
       fsyncSync(fd);
     } catch {
     }
-    closeSync(fd);
+    closeSync2(fd);
     fd = null;
     renameSync2(tempPath, path);
     fsyncDirectoryBestEffort(directory);
   } catch (error) {
     try {
-      if (fd !== null) closeSync(fd);
+      if (fd !== null) closeSync2(fd);
     } catch {
     }
     try {
@@ -3115,7 +3166,7 @@ var SessionRepository = class {
 };
 
 // src/acp/file-snapshot.ts
-import { closeSync as closeSync2, constants, fstatSync, openSync as openSync2, readSync, statSync as statSync6 } from "fs";
+import { closeSync as closeSync3, constants, fstatSync, openSync as openSync3, readSync as readSync2, statSync as statSync6 } from "fs";
 var MAX_SNAPSHOT_BYTES = 1024 * 1024;
 function fileSnapshot(path) {
   let fd;
@@ -3124,14 +3175,14 @@ function fileSnapshot(path) {
     const before = statSync6(path);
     found = true;
     if (!before.isFile() || before.size > MAX_SNAPSHOT_BYTES) return void 0;
-    fd = openSync2(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    fd = openSync3(path, constants.O_RDONLY | constants.O_NONBLOCK);
     const opened = fstatSync(fd);
     if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size > MAX_SNAPSHOT_BYTES)
       return void 0;
     const buffer = Buffer.allocUnsafe(MAX_SNAPSHOT_BYTES + 1);
     let length = 0;
     while (length < buffer.length) {
-      const count = readSync(fd, buffer, length, buffer.length - length, length);
+      const count = readSync2(fd, buffer, length, buffer.length - length, length);
       if (!count) break;
       length += count;
     }
@@ -3143,7 +3194,7 @@ function fileSnapshot(path) {
   } catch (error) {
     return !found && error.code === "ENOENT" ? null : void 0;
   } finally {
-    if (fd !== void 0) closeSync2(fd);
+    if (fd !== void 0) closeSync3(fd);
   }
 }
 
@@ -6638,7 +6689,10 @@ var RuntimeGateway = class {
   async launch(value) {
     const params = object(value), identity = parseIdentity(params), cwd = string(params.cwd);
     if (this.closed) throw new Error("ACP connection closing");
-    const sessionPath = identitySession(identity) ?? (params.sessionFile ? string(params.sessionFile) : void 0);
+    const sessionPath = resolveIdentitySessionFile(
+      identity,
+      params.sessionFile ? string(params.sessionFile) : void 0
+    );
     const proc = await PiRpcProcess.spawn({
       cwd,
       identity,
