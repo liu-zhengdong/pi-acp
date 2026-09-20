@@ -55,7 +55,6 @@
     "smoke:runtime": "node scripts/smoke-runtime.mjs",
     "eval:acp": "npm run compile && node scripts/eval-zed-acp.mjs",
     "validate": "npm run format:check && npm run typecheck && npm run lint && npm test && npm run compile",
-    "prepack": "npm run validate",
     "prepublishOnly": "npm run validate"
   },
   "dependencies": {
