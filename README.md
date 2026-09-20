@@ -13,6 +13,8 @@ npm install -g @liuser/pi-acp
 pi install npm:@liuser/pi-mcp-adapter
 ```
 
+需要尚未发布的最新能力时，也可以直接安装 git 版本（`dist` 已入库，无需构建）：`npm install github:liu-zhengdong/pi-acp`，Pi 包管理器同样支持以 git 源安装本仓库。
+
 第二条安装提供 MCP 能力的配套 Pi 扩展。仅使用后台 ACP 会话时，第一条 CLI 安装已经足够；需要日常 TUI 原进程接入时，再启用本包的通用 Pi 扩展，见下文。已有无作用域 MCP adapter 时，应先用 `pi remove npm:pi-mcp-adapter` 移除旧包的加载项，再安装 scoped 版本；MCP 配置和认证不需要迁移。
 
 ## 上游同步
